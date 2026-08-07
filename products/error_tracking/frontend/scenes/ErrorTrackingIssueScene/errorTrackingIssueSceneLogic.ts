@@ -233,7 +233,7 @@ export interface errorTrackingIssueSceneLogicActions {
             status: ErrorTrackingIssueStatus
         } | null,
         payload?: {
-            externalContext: Record<string, number | string>
+            externalContext: ErrorTrackingExternalReferenceLinkApiExternalContext
             integrationId: number
         }
     ) => {
@@ -248,7 +248,7 @@ export interface errorTrackingIssueSceneLogicActions {
             status: ErrorTrackingIssueStatus
         } | null
         payload?: {
-            externalContext: Record<string, number | string>
+            externalContext: ErrorTrackingExternalReferenceLinkApiExternalContext
             integrationId: number
         }
     }
