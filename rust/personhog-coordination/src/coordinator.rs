@@ -31,7 +31,20 @@ pub struct CoordinatorConfig {
     pub name: String,
     pub leader_lease_ttl: i64,
     pub keepalive_interval: Duration,
-    pub election_retry_interval: Duration,
+    /// How long a standby candidate waits on its leader-key watch before
+    /// re-reading the key. The watch is what normally wakes a candidate;
+    /// this is the bound on how long a stalled one can hide an opening.
+    pub standby_poll_interval: Duration,
+
+    pub run_retry_backoff: Duration,
+    /// How long without a bad ending before the pace starts over.
+    ///
+    /// Paces only — nothing escalates, so this decides how fast the
+    /// coordinator recovers, not whether it survives. Without it the
+    /// count never falls, so a bad spell in the morning leaves every
+    /// candidate at the cap, and an isolated failure that evening costs
+    /// the cap instead of the base while the cluster sits leaderless.
+    pub backoff_decay_window: Duration,
     /// How long to wait after the first pod event before rebalancing, to batch
     /// rapid pod registrations into a single rebalance.
     pub rebalance_debounce_interval: Duration,
@@ -80,15 +93,29 @@ impl Default for CoordinatorConfig {
         Self {
             name: "coordinator-0".to_string(),
             // A crashed leader blocks every handoff until its election
-            // lease expires and a survivor's next campaign fires, so the
-            // worst-case coordinator outage is ttl + retry. 5s + 1s keeps
-            // that near the pod-crash detection window, while the 1s
-            // keepalive gives the leader several attempts within the TTL
-            // before it abdicates. Graceful exits don't wait on any of
-            // this — the lease is revoked on the way out.
+            // lease expires and a survivor takes over. Standbys watch the
+            // leader key, so the succession follows the key's deletion
+            // rather than a retry tick, and the TTL is what bounds the
+            // outage. 5s keeps that near the pod-crash detection window,
+            // while the 1s keepalive gives the leader several attempts
+            // within the TTL before it abdicates. Graceful exits don't
+            // wait on any of this — the lease is revoked on the way out.
             leader_lease_ttl: 5,
             keepalive_interval: Duration::from_secs(1),
-            election_retry_interval: Duration::from_secs(1),
+            // How long a standby trusts its watch before re-reading the
+            // leader key. This bounds the leaderless window if a watch
+            // ever stalls without erroring, and it is the only etcd
+            // traffic an idle standby generates, so it buys a wide safety
+            // margin cheaply: one key read and one watch stream per
+            // candidate per interval, against a campaign per candidate
+            // per retry.
+            standby_poll_interval: Duration::from_secs(5),
+            // The base of the only wait the coordinator has. It doubles
+            // per consecutive bad ending to a 15s cap, so a wedged
+            // coordinator settles into retrying at that cap rather than
+            // hot-looping.
+            run_retry_backoff: Duration::from_millis(500),
+            backoff_decay_window: Duration::from_secs(300),
             rebalance_debounce_interval: Duration::from_secs(1),
             reconcile_interval: Duration::from_secs(5),
             handoff_deadline: Duration::from_secs(120),
@@ -126,6 +153,59 @@ pub struct Coordinator {
 /// evaluations record the ack-to-advance span: a departure or tick can
 /// legitimately advance a handoff on acks that arrived long before, and
 /// that elapsed time measures the blocker, not coordinator reaction.
+/// How long the election lease revoke may take before shutdown stops
+/// waiting for it. Matches the pod's equivalent.
+const REVOKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A cancellation this coordinator intends, and what to attribute it to
+/// once it has landed.
+///
+/// Counted after the transaction rather than when the plan is built: a
+/// concurrent coordinator can win the same partition, and counting at
+/// intent attributes cancellations this coordinator never made — to
+/// named routers, in the case of the missing-acker counter.
+struct Cancellation {
+    reason: &'static str,
+    missing_ackers: Vec<String>,
+}
+
+impl Cancellation {
+    fn record(&self) {
+        counter!(
+            "personhog_coordination_handoffs_cancelled_total",
+            "reason" => self.reason,
+        )
+        .increment(1);
+        for router in &self.missing_ackers {
+            counter!(
+                "personhog_coordination_freeze_ack_missing_total",
+                "router" => router.clone(),
+            )
+            .increment(1);
+        }
+    }
+}
+
+/// A cancellation with no successor and no live owner to reaffirm
+/// toward, applied as its own guarded transaction after the plan.
+struct FallbackDelete {
+    predecessor: HandoffState,
+    mod_revision: i64,
+    cancellation: Cancellation,
+}
+
+/// Why a standby stopped waiting on the leader-key watch.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Woke {
+    /// The leader key was deleted: the election is open.
+    Opened,
+    /// The fallback interval elapsed; re-read in case the watch is
+    /// stalled without having errored.
+    Fallback,
+    /// The stream ended or errored, so it can no longer be trusted.
+    StreamLost,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AdvanceTrigger {
     Ack,
@@ -150,27 +230,191 @@ impl Coordinator {
     /// Run the coordinator loop. Continuously attempts leader election;
     /// when elected, runs the coordination loop until leadership is lost
     /// or cancellation is requested.
-    pub async fn run(&self, cancel: CancellationToken) -> Result<()> {
+    pub async fn run(&self, cancel: CancellationToken) {
         util::preregister_coordinator_metrics();
+        // Paces retries only — nothing here escalates. It grows while
+        // bad endings keep arriving and starts over after a quiet
+        // window, so a wedged coordinator settles at the cap while an
+        // isolated failure long after a bad spell still costs the base.
+        let mut consecutive_endings = 0u32;
+        let mut last_ending: Option<Instant> = None;
         loop {
             if cancel.is_cancelled() {
-                return Ok(());
+                return;
             }
-            // Awaited to completion, never raced against cancellation:
-            // dropping try_lead mid-cleanup would strand the election
-            // lease until TTL expiry, stalling every handoff while the
-            // next coordinator's campaign waits it out. try_lead observes
-            // `cancel` internally and returns promptly on shutdown.
-            match self.try_lead(cancel.clone()).await {
-                Ok(true) => tracing::info!(name = %self.config.name, "leadership ended normally"),
+            // Campaign only into an opening. A campaign costs a lease
+            // grant, a transaction and a revoke whether or not it wins,
+            // and every standby pays it: polling the election is the
+            // fleet's largest source of etcd writes, and it scales with
+            // the fleet rather than with how often leadership changes.
+            //
+            // Failing to observe the election counts the same as failing
+            // to enter one. Both leave this candidate unable to lead, so
+            // both spend the budget below rather than retrying in
+            // silence.
+            let attempt = match self.await_election_opening(&cancel).await {
+                Ok(()) if cancel.is_cancelled() => return,
+                // Awaited to completion, never raced against
+                // cancellation: dropping try_lead mid-cleanup would
+                // strand the election lease until TTL expiry, stalling
+                // every handoff while the next coordinator's campaign
+                // waits it out. try_lead observes `cancel` internally and
+                // returns promptly on shutdown.
+                Ok(()) => self.try_lead(cancel.clone()).await,
+                Err(e) => Err(e),
+            };
+            match attempt {
+                Ok(true) => {
+                    tracing::info!(name = %self.config.name, "leadership ended normally");
+                }
                 Ok(false) => {}
+                Err(e) if e.is_leadership_lost() => {
+                    tracing::info!(name = %self.config.name, "abdicated; a successor takes over");
+                    // Counted so a lease that cannot renew — which
+                    // reaches this arm every term, each one paying a full
+                    // bootstrap to lead for a renewal margin and stop —
+                    // is visible as the flap it is.
+                    counter!("personhog_coordination_abdications_total").increment(1);
+                    // Paced like any other bad ending. `try_lead` revoked
+                    // on the way out, so the key this candidate would
+                    // wait on is already gone; without a growing pace a
+                    // lease that cannot renew flaps at a fixed rate
+                    // forever, and no term lasts long enough to move a
+                    // handoff through its phases.
+                    let wait = self.pace_after_ending(&mut consecutive_endings, &mut last_ending);
+                    if self.wait_or_shutdown(&cancel, wait).await {
+                        return;
+                    }
+                }
                 Err(e) => {
-                    tracing::warn!(name = %self.config.name, error = %e, "leader loop ended with error")
+                    let wait = self.pace_after_ending(&mut consecutive_endings, &mut last_ending);
+                    util::record_run_failure(
+                        "coordinator",
+                        &self.config.name,
+                        consecutive_endings,
+                        &e,
+                    );
+                    if self.wait_or_shutdown(&cancel, wait).await {
+                        return;
+                    }
                 }
             }
-            tokio::select! {
-                _ = cancel.cancelled() => return Ok(()),
-                _ = tokio::time::sleep(self.config.election_retry_interval) => {}
+        }
+    }
+
+    /// How long to wait before campaigning again after a term ended
+    /// badly, growing while they keep arriving.
+    ///
+    /// Both bad endings share one pace: an abdication and a failed
+    /// attempt cost the same bootstrap and want the same restraint, and
+    /// keeping one counter means neither can be slowed by the other's
+    /// history in a way the code does not say out loud.
+    fn pace_after_ending(&self, consecutive: &mut u32, last: &mut Option<Instant>) -> Duration {
+        const BACKOFF_CAP: Duration = Duration::from_secs(15);
+        let quiet = last.is_none_or(|at| at.elapsed() >= self.config.backoff_decay_window);
+        *last = Some(Instant::now());
+        *consecutive = if quiet {
+            1
+        } else {
+            consecutive.saturating_add(1)
+        };
+        self.config
+            .run_retry_backoff
+            .saturating_mul(2u32.saturating_pow(consecutive.saturating_sub(1)))
+            .min(BACKOFF_CAP)
+    }
+
+    /// Wait, or report that shutdown arrived first.
+    async fn wait_or_shutdown(&self, cancel: &CancellationToken, delay: Duration) -> bool {
+        tokio::select! {
+            _ = cancel.cancelled() => true,
+            _ = tokio::time::sleep(delay) => false,
+        }
+    }
+
+    /// Give up the election lease, bounded.
+    ///
+    /// Cleanup on a path whose usual reason for existing is an unwell
+    /// etcd, and the store sets no request timeout of its own — so
+    /// unbounded this waits out the whole outage, holding the shutdown
+    /// past the termination grace period the charts allow. The lease
+    /// expires on its TTL regardless; all a successful revoke buys is
+    /// the next candidate not waiting for it.
+    async fn revoke_election_lease(&self, lease_id: i64) -> Result<()> {
+        tokio::time::timeout(REVOKE_TIMEOUT, self.store.revoke_lease(lease_id))
+            .await
+            .unwrap_or_else(|_| {
+                tracing::warn!(
+                    name = %self.config.name,
+                    lease_id,
+                    "election lease revoke timed out; it expires on its TTL"
+                );
+                Ok(())
+            })
+    }
+
+    /// Block until this candidate has something to campaign for: no
+    /// leader is recorded, or the one that is recorded goes away.
+    /// Returns immediately on cancellation, leaving the caller to notice
+    /// it and stop.
+    ///
+    /// Standing by costs one read per fallback interval and a watch that
+    /// is idle until leadership actually changes, in place of a campaign
+    /// per retry interval. The fallback re-read is what keeps a watch
+    /// that stalls without erroring from parking a candidate forever, so
+    /// the leaderless window stays bounded by it in the worst case.
+    pub async fn await_election_opening(&self, cancel: &CancellationToken) -> Result<()> {
+        loop {
+            // The revision this answer was read at anchors the watch, so
+            // a leader that vanishes between the read and the watch
+            // attaching is still delivered rather than missed.
+            let (leader, revision) = self.store.get_leader_with_revision().await?;
+            let Some(leader) = leader else {
+                return Ok(());
+            };
+            tracing::debug!(
+                name = %self.config.name,
+                leader = %leader.holder,
+                "another coordinator is leader, standing by"
+            );
+
+            let mut stream = self.store.watch_leader_from(revision + 1).await?;
+            let woke = loop {
+                let message = tokio::select! {
+                    _ = cancel.cancelled() => return Ok(()),
+                    _ = tokio::time::sleep(self.config.standby_poll_interval) => break Woke::Fallback,
+                    message = stream.message() => message,
+                };
+                // A stream that ends or errors leaves this candidate
+                // blind, so re-read rather than trusting it further.
+                let Ok(Some(response)) = message else {
+                    break Woke::StreamLost;
+                };
+                if response
+                    .events()
+                    .iter()
+                    .any(|event| event.event_type() == EventType::Delete)
+                {
+                    break Woke::Opened;
+                }
+            };
+            match woke {
+                Woke::Opened => return Ok(()),
+                // The fallback is meant to re-read at once; that is what
+                // it is for.
+                Woke::Fallback => {}
+                // A stream that fails immediately would otherwise spin
+                // this loop at one read and one watch creation per round
+                // trip, per candidate — against an etcd already unwell
+                // enough to be dropping watches. Waiting the fallback
+                // interval degrades cleanly to what a candidate does
+                // when it has no working watch at all: poll.
+                Woke::StreamLost => {
+                    tokio::select! {
+                        _ = cancel.cancelled() => return Ok(()),
+                        _ = tokio::time::sleep(self.config.standby_poll_interval) => {}
+                    }
+                }
             }
         }
     }
@@ -181,6 +425,10 @@ impl Coordinator {
     /// election immediately instead of stranding it until TTL expiry.
     /// `run` relies on that by awaiting this call to completion.
     async fn try_lead(&self, cancel: CancellationToken) -> Result<bool> {
+        // Every campaign costs etcd a lease grant, a transaction and,
+        // when it loses, a revoke. Against wins, this is what says
+        // whether the fleet is electing or merely polling.
+        counter!("personhog_coordination_election_campaigns_total").increment(1);
         let granted_at = Instant::now();
         let lease_id = self.store.grant_lease(self.config.leader_lease_ttl).await?;
 
@@ -191,7 +439,7 @@ impl Coordinator {
         {
             Ok(acquired) => acquired,
             Err(e) => {
-                drop(self.store.revoke_lease(lease_id).await);
+                drop(self.revoke_election_lease(lease_id).await);
                 return Err(e);
             }
         };
@@ -200,7 +448,7 @@ impl Coordinator {
             tracing::debug!(name = %self.config.name, "another coordinator is leader, standing by");
             // Nothing hangs off the lease; revoke it rather than leaking
             // one lease per election retry from every standby candidate.
-            drop(self.store.revoke_lease(lease_id).await);
+            drop(self.revoke_election_lease(lease_id).await);
             return Ok(false);
         }
 
@@ -265,7 +513,7 @@ impl Coordinator {
 
         // Revoke so the next candidate's campaign wins immediately instead
         // of waiting out the lease TTL.
-        drop(self.store.revoke_lease(lease_id).await);
+        drop(self.revoke_election_lease(lease_id).await);
 
         reset_coordinator_gauges();
 
@@ -592,14 +840,26 @@ impl Coordinator {
         cancel: CancellationToken,
     ) -> Result<()> {
         let mut tick = tokio::time::interval(interval);
+        // As the pod's and router's passes do. The default replays every
+        // missed tick back to back, which would fire this body's read
+        // fan-out — one pass per in-flight handoff — in a tight loop
+        // exactly when etcd is too slow to have kept up with it.
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => return Ok(()),
                 _ = tick.tick() => {
+                    // Listed before the handoffs, which is what makes
+                    // the sweep below safe: every handoff that existed
+                    // when these ids were read appears in the newer
+                    // handoff list, and a membership written after this
+                    // read is not a candidate at all.
+                    let quorum_candidates = store.list_freeze_quorum_ids().await;
                     let handoffs = store.list_handoffs().await?;
                     for handoff in &handoffs {
                         Self::handle_handoff_update_static(&store, handoff).await?;
-                        Self::check_phase_advance(&store, handoff.partition, AdvanceTrigger::Other).await?;
+                        Self::check_phase_advance(&store, handoff.partition, AdvanceTrigger::Other)
+                            .await?;
                     }
                     // Advancement first, planning second: a handoff that
                     // can still progress gets every chance to before the
@@ -629,6 +889,68 @@ impl Coordinator {
                             tracing::debug!(error = %e, "skipping cluster gauge refresh");
                         }
                     }
+                    // Last, with the gauge refresh, because it is
+                    // housekeeping by the same standard: only its two
+                    // reads above need their order, while its deletes
+                    // are a round trip per orphan that a read-only etcd
+                    // would otherwise charge ahead of every handoff and
+                    // the planner wake.
+                    Self::collect_stale_freeze_quorums(&store, quorum_candidates, &handoffs).await;
+                }
+            }
+        }
+    }
+
+    /// Delete the freeze-quorum records no live handoff refers to.
+    ///
+    /// Housekeeping, so every failure is logged and dropped: a record
+    /// left behind costs a few kilobytes until the next tick, and one
+    /// deleted while still referenced only makes its handoff fall back
+    /// to requiring every live router. Neither can advance a handoff
+    /// early, which is why this runs without a transaction.
+    ///
+    /// Note what observes a record deleted in error. A coordinator that
+    /// still holds it cached keeps using the correct membership and says
+    /// nothing — the cache neutralizes the mistake rather than reporting
+    /// it. `unresolved_freeze_quorums_total` covers a process that has
+    /// to read (a fresh leader, or one whose entry was evicted), and the
+    /// collection counter here covers the rate at which records go.
+    async fn collect_stale_freeze_quorums(
+        store: &PersonhogStore,
+        candidates: Result<Vec<String>>,
+        handoffs: &[HandoffState],
+    ) {
+        let candidates = match candidates {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::debug!(error = %e, "skipping freeze quorum sweep");
+                return;
+            }
+        };
+        let referenced: HashSet<&str> = handoffs
+            .iter()
+            .filter_map(|h| h.freeze_quorum_ref.as_deref())
+            .collect();
+        for id in candidates
+            .iter()
+            .filter(|id| !referenced.contains(id.as_str()))
+        {
+            match store.delete_freeze_quorum(id).await {
+                Ok(()) => {
+                    // The cheap half of the sweep's observability: a
+                    // rate here that outpaces plan creation is the shape
+                    // a sweep collecting records it should have spared
+                    // would take.
+                    counter!("personhog_coordination_freeze_quorums_collected_total").increment(1);
+                    tracing::debug!(quorum_id = %id, "collected unreferenced freeze quorum");
+                }
+                Err(e) => {
+                    // Counted, not only logged: the router runs at INFO,
+                    // so a sweep whose every delete fails is otherwise
+                    // silent while its backlog grows one record per plan.
+                    counter!("personhog_coordination_freeze_quorum_sweep_failures_total")
+                        .increment(1);
+                    tracing::debug!(quorum_id = %id, error = %e, "freeze quorum sweep failed")
                 }
             }
         }
@@ -661,10 +983,11 @@ impl Coordinator {
             HandoffPhase::Freezing => {
                 let routers = store.list_routers().await?;
                 let freeze_acks = store.list_freeze_acks(partition).await?;
+                let quorum = store.resolve_freeze_quorum(&handoff).await?;
 
                 // Quorum semantics live in `protocol::freeze_quorum_met`
                 // (shared with the stateright model).
-                if freeze_quorum_met(&routers, &freeze_acks, &handoff) {
+                if freeze_quorum_met(&routers, &freeze_acks, &handoff, quorum.as_deref()) {
                     // Initial assignments (no old owner) skip Draining
                     // entirely — there's no inflight to wait for. Advance
                     // straight to Warming.
@@ -705,8 +1028,12 @@ impl Coordinator {
                     tracing::info!(
                         partition,
                         handoff_id = %handoff.handoff_id,
-                        missing_freeze_ackers =
-                            ?missing_freeze_ackers(&routers, &freeze_acks, &handoff),
+                        missing_freeze_ackers = ?missing_freeze_ackers(
+                            &routers,
+                            &freeze_acks,
+                            &handoff,
+                            quorum.as_deref()
+                        ),
                         "freeze quorum not yet met"
                     );
                 }
@@ -903,6 +1230,10 @@ impl Coordinator {
         // come and go (see `HandoffState::freeze_quorum`).
         let routers = store.list_routers().await?;
         let freeze_quorum: Vec<String> = routers.iter().map(|r| r.router_name.clone()).collect();
+        // One record for the whole plan: the membership is the same for
+        // every handoff it creates, and inlining it per handoff is what
+        // made a large plan exceed etcd's maximum request size.
+        let freeze_quorum_id = util::new_handoff_id();
 
         let now = util::now_seconds();
         let handoff_objects: Vec<HandoffState> = plan
@@ -919,7 +1250,8 @@ impl Coordinator {
                 phase: HandoffPhase::Freezing,
                 started_at: now,
                 handoff_id: util::new_handoff_id(),
-                freeze_quorum: Some(freeze_quorum.clone()),
+                freeze_quorum: None,
+                freeze_quorum_ref: Some(freeze_quorum_id.clone()),
                 created_at_ms: now_ms,
                 phase_entered_at_ms: now_ms,
             })
@@ -945,14 +1277,24 @@ impl Coordinator {
             .collect();
         let mut creations: Vec<HandoffState> = Vec::new();
         let mut replacements: Vec<HandoffReplacement> = Vec::new();
-        let mut fallback_deletes: Vec<(HandoffState, i64)> = Vec::new();
+        let mut fallback_deletes: Vec<FallbackDelete> = Vec::new();
         let mut replaced_dispositions: Vec<&'static str> = Vec::new();
+        // Held until the plan transaction lands; see `Cancellation`.
+        let mut planned_cancellations: Vec<Cancellation> = Vec::new();
 
         for handoff in handoff_objects {
             match cancelled_by_partition.remove(&handoff.partition) {
                 Some((predecessor, mod_revision)) => {
-                    Self::log_cancellation(store, &routers, &predecessor, &registered, "successor")
-                        .await;
+                    planned_cancellations.push(
+                        Self::describe_cancellation(
+                            store,
+                            &routers,
+                            &predecessor,
+                            &registered,
+                            "successor",
+                        )
+                        .await,
+                    );
                     replacements.push(HandoffReplacement {
                         handoff,
                         expected_mod_revision: mod_revision,
@@ -968,8 +1310,16 @@ impl Coordinator {
                 .filter(|owner| registered.contains(owner.as_str()));
             match owner {
                 Some(owner) => {
-                    Self::log_cancellation(store, &routers, &predecessor, &registered, "reaffirm")
-                        .await;
+                    planned_cancellations.push(
+                        Self::describe_cancellation(
+                            store,
+                            &routers,
+                            &predecessor,
+                            &registered,
+                            "reaffirm",
+                        )
+                        .await,
+                    );
                     replacements.push(HandoffReplacement {
                         handoff: HandoffState {
                             partition: predecessor.partition,
@@ -982,7 +1332,12 @@ impl Coordinator {
                             phase: HandoffPhase::Complete,
                             started_at: now,
                             handoff_id: util::new_handoff_id(),
+                            // A reaffirm requires no acks at all, which
+                            // an empty membership states directly — no
+                            // record to resolve, and never the legacy
+                            // fallback.
                             freeze_quorum: Some(Vec::new()),
+                            freeze_quorum_ref: None,
                             created_at_ms: now_ms,
                             phase_entered_at_ms: now_ms,
                         },
@@ -991,9 +1346,19 @@ impl Coordinator {
                     replaced_dispositions.push("reaffirm");
                 }
                 None => {
-                    Self::log_cancellation(store, &routers, &predecessor, &registered, "delete")
-                        .await;
-                    fallback_deletes.push((predecessor, mod_revision));
+                    let cancellation = Self::describe_cancellation(
+                        store,
+                        &routers,
+                        &predecessor,
+                        &registered,
+                        "delete",
+                    )
+                    .await;
+                    fallback_deletes.push(FallbackDelete {
+                        predecessor,
+                        mod_revision,
+                        cancellation,
+                    });
                 }
             }
         }
@@ -1035,9 +1400,25 @@ impl Coordinator {
             })
             .collect();
 
+        let references_quorum = creations
+            .iter()
+            .chain(replacements.iter().map(|r| &r.handoff))
+            .any(|handoff| handoff.freeze_quorum_ref.is_some());
         if (!creations.is_empty() || !replacements.is_empty())
             && !store
-                .apply_plan(&[], &creations, &replacements, &preconditions)
+                .apply_plan(
+                    &[],
+                    &creations,
+                    &replacements,
+                    &preconditions,
+                    // A plan whose cancellations all resolve to reaffirms
+                    // creates no handoff that refers to a membership, and
+                    // that is the common shape when a wedged freeze had
+                    // sound placement. Writing one anyway leaves a record
+                    // for the next sweep to delete, during the mass
+                    // cancellation when etcd is least well.
+                    references_quorum.then_some((&freeze_quorum_id, &freeze_quorum)),
+                )
                 .await?
         {
             // A concurrent invocation (the empty-set re-trigger racing a
@@ -1061,6 +1442,9 @@ impl Coordinator {
                 "handoff created"
             );
         }
+        for cancellation in &planned_cancellations {
+            cancellation.record();
+        }
         for disposition in &replaced_dispositions {
             counter!(
                 "personhog_coordination_handoffs_replaced_total",
@@ -1074,11 +1458,15 @@ impl Coordinator {
         // its own, which is what the safety argument needs, and a stale
         // guard only ever skips a cancel for a record that changed under
         // us.
-        for (predecessor, mod_revision) in fallback_deletes {
+        for delete in fallback_deletes {
             if store
-                .delete_handoff_and_acks_if_unchanged(predecessor.partition, mod_revision)
+                .delete_handoff_and_acks_if_unchanged(
+                    delete.predecessor.partition,
+                    delete.mod_revision,
+                )
                 .await?
             {
+                delete.cancellation.record();
                 counter!(
                     "personhog_coordination_handoffs_replaced_total",
                     "disposition" => "delete",
@@ -1113,23 +1501,36 @@ impl Coordinator {
     /// one specific non-acking router, and naming it turns the diagnosis
     /// into reading a label. Attribution is best-effort; a failed ack
     /// read must not block the replacement.
-    async fn log_cancellation(
+    /// Describe a cancellation and log the intent, returning what to
+    /// count once it has actually happened.
+    async fn describe_cancellation(
         store: &PersonhogStore,
         routers: &[RegisteredRouter],
         predecessor: &HandoffState,
         registered: &HashSet<&str>,
         disposition: &'static str,
-    ) {
+    ) -> Cancellation {
         let reason = if registered.contains(predecessor.new_owner.as_str()) {
             "phase_deadline"
         } else {
             "dead_new_owner"
         };
+        // Attribution only. A read that fails here must not be turned
+        // into an answer: `None` means "no membership recorded", which
+        // widens the requirement to every live router, so a transient
+        // error would name every one of them as a blocker — during the
+        // mass cancellation when etcd is least well and the accusation
+        // is least true.
         let missing_ackers = if predecessor.phase == HandoffPhase::Freezing {
-            match store.list_freeze_acks(predecessor.partition).await {
-                Ok(acks) => missing_freeze_ackers(routers, &acks, predecessor),
-                Err(e) => {
-                    tracing::warn!(error = %e, "could not read freeze acks for attribution");
+            match (
+                store.resolve_freeze_quorum(predecessor).await,
+                store.list_freeze_acks(predecessor.partition).await,
+            ) {
+                (Ok(quorum), Ok(acks)) => {
+                    missing_freeze_ackers(routers, &acks, predecessor, quorum.as_deref())
+                }
+                (Err(e), _) | (_, Err(e)) => {
+                    tracing::warn!(error = %e, "could not attribute the missing freeze acks");
                     Vec::new()
                 }
             }
@@ -1146,17 +1547,9 @@ impl Coordinator {
             missing_freeze_ackers = ?missing_ackers,
             "cancelling handoff by replacement"
         );
-        counter!(
-            "personhog_coordination_handoffs_cancelled_total",
-            "reason" => reason,
-        )
-        .increment(1);
-        for router in &missing_ackers {
-            counter!(
-                "personhog_coordination_freeze_ack_missing_total",
-                "router" => router.clone(),
-            )
-            .increment(1);
+        Cancellation {
+            reason,
+            missing_ackers,
         }
     }
 

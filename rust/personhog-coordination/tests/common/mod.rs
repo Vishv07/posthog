@@ -145,7 +145,11 @@ pub fn start_coordinator_with_deadline(
             name: name.to_string(),
             leader_lease_ttl,
             keepalive_interval: Duration::from_secs(keepalive_secs),
-            election_retry_interval: Duration::from_secs(1),
+            // Short enough that a failover never waits on the leader-key
+            // watch alone.
+            standby_poll_interval: Duration::from_millis(500),
+            run_retry_backoff: Duration::from_millis(10),
+            backoff_decay_window: Duration::from_secs(300),
             rebalance_debounce_interval: Duration::from_millis(100),
             reconcile_interval: Duration::from_millis(500),
             // Callers default this to a day: these tests deliberately
@@ -160,7 +164,10 @@ pub fn start_coordinator_with_deadline(
         None,
     );
     let token = cancel.child_token();
-    tokio::spawn(async move { coordinator.run(token).await })
+    tokio::spawn(async move {
+        coordinator.run(token).await;
+        Ok(())
+    })
 }
 
 pub struct PodHandles {
@@ -686,7 +693,10 @@ pub fn start_coordinator_reconcile_parked(
         None,
     );
     let token = cancel.child_token();
-    tokio::spawn(async move { coordinator.run(token).await })
+    tokio::spawn(async move {
+        coordinator.run(token).await;
+        Ok(())
+    })
 }
 
 pub fn start_coordinator_with_debounce(
@@ -705,7 +715,10 @@ pub fn start_coordinator_with_debounce(
         None,
     );
     let token = cancel.child_token();
-    tokio::spawn(async move { coordinator.run(token).await })
+    tokio::spawn(async move {
+        coordinator.run(token).await;
+        Ok(())
+    })
 }
 
 pub fn start_pod_slow(
@@ -809,6 +822,7 @@ pub struct FlakyProxy {
     pub endpoint: String,
     conns: Arc<StdMutex<Vec<tokio::task::JoinHandle<()>>>>,
     blackholed: Arc<AtomicBool>,
+    accepted: Arc<AtomicUsize>,
     listener: tokio::task::JoinHandle<()>,
 }
 
@@ -819,6 +833,8 @@ impl FlakyProxy {
         let conns: Arc<StdMutex<Vec<tokio::task::JoinHandle<()>>>> =
             Arc::new(StdMutex::new(Vec::new()));
         let blackholed = Arc::new(AtomicBool::new(false));
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let accepted_bg = Arc::clone(&accepted);
         let conns_bg = Arc::clone(&conns);
         let blackholed_bg = Arc::clone(&blackholed);
         let listener = tokio::spawn(async move {
@@ -826,6 +842,7 @@ impl FlakyProxy {
                 let Ok((mut client, _)) = socket.accept().await else {
                     return;
                 };
+                accepted_bg.fetch_add(1, Ordering::SeqCst);
                 if blackholed_bg.load(Ordering::SeqCst) {
                     drop(client);
                     continue;
@@ -843,8 +860,19 @@ impl FlakyProxy {
             endpoint,
             conns,
             blackholed,
+            accepted,
             listener,
         }
+    }
+
+    /// How many connections the proxy has accepted since it started.
+    ///
+    /// A blackholed proxy drops each one immediately, so a client that
+    /// keeps retrying keeps climbing this — which is what makes "it is
+    /// still trying" a fact a test can wait on rather than a duration it
+    /// hopes is long enough.
+    pub fn accepted(&self) -> usize {
+        self.accepted.load(Ordering::SeqCst)
     }
 
     /// Break every live connection; the streams running over them error

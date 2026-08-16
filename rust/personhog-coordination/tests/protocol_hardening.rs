@@ -7,10 +7,11 @@
 //! All tests run against a real etcd at localhost:2379 with per-test key
 //! prefixes, matching the conventions in `integration.rs`.
 
+use etcd_client::EventType;
 use personhog_coordination::authority::AuthorityClock;
 mod common;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::pending;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -30,7 +31,9 @@ use common::{
     FlakyProxy, HandoffEvent, MockCutoverHandler, MockHandoffHandler, ETCD_ENDPOINT, POLL_INTERVAL,
     WAIT_TIMEOUT,
 };
+use personhog_coordination::coordinator::{Coordinator, CoordinatorConfig};
 use personhog_coordination::error::Result;
+use personhog_coordination::protocol::freeze_quorum_met;
 use personhog_coordination::routing_table::{RoutingTable, RoutingTableConfig, StashHandler};
 use personhog_coordination::store::PersonhogStore;
 use personhog_coordination::strategy::StickyBalancedStrategy;
@@ -56,6 +59,7 @@ async fn put_handoff(
         started_at: 0,
         handoff_id: format!("test-handoff-{partition}"),
         freeze_quorum: None,
+        freeze_quorum_ref: None,
         created_at_ms: 0,
         phase_entered_at_ms: 0,
         new_owner_address: None,
@@ -2594,6 +2598,7 @@ async fn put_handoff_with_id(
         started_at: 0,
         handoff_id: handoff_id.to_string(),
         freeze_quorum: None,
+        freeze_quorum_ref: None,
         created_at_ms: 0,
         phase_entered_at_ms: 0,
         new_owner_address: None,
@@ -4337,4 +4342,818 @@ async fn a_pending_new_owner_is_hinted_but_not_warmed() {
     );
 
     cancel.cancel();
+}
+
+/// A standby waits on the leader key rather than campaigning at its
+/// retry interval.
+///
+/// Every campaign costs etcd a lease grant, a transaction and a revoke,
+/// paid by each candidate on each retry, so the fleet's election traffic
+/// scaled with the number of candidates rather than with how often
+/// leadership changed. Standing by must cost nothing until the key
+/// actually goes away.
+///
+/// The fallback re-read is set far beyond the test's own timeouts, and
+/// a successor reclaims the key the instant it is released, so a re-read
+/// cannot end the wait either — only the delete event can. That the watch delivers a delete
+/// landing in the gap between the read and the watch attaching is a
+/// separate property, pinned deterministically by
+/// `a_leader_that_goes_between_the_read_and_the_watch_is_still_delivered`
+/// — this test cannot force that interleaving.
+#[tokio::test]
+async fn a_standby_waits_on_the_leader_key_rather_than_campaigning() {
+    let prefix = format!("/test-standby-watch-{}/", uuid::Uuid::new_v4());
+    let store = store_at(ETCD_ENDPOINT, &prefix).await;
+
+    let standby = Arc::new(Coordinator::new(
+        Arc::clone(&store),
+        CoordinatorConfig {
+            name: "standby".to_string(),
+            standby_poll_interval: Duration::from_secs(600),
+            ..Default::default()
+        },
+        Arc::new(StickyBalancedStrategy),
+        None,
+    ));
+    let cancel = CancellationToken::new();
+
+    // With no leader recorded, the election is open and the wait is over
+    // before it starts.
+    tokio::time::timeout(WAIT_TIMEOUT, standby.await_election_opening(&cancel))
+        .await
+        .expect("an unheld election must not make a candidate wait")
+        .expect("reading the leader key must succeed");
+
+    // The lease only serves to take the key. The test drives the key
+    // directly from there, because revoking the lease can only produce a
+    // delete, and the first thing to prove is that a write which is not
+    // a delete leaves the candidate parked.
+    let lease_id = store.grant_lease(10).await.unwrap();
+    assert!(
+        store
+            .try_acquire_leadership("incumbent", lease_id)
+            .await
+            .unwrap(),
+        "the test's own leader must take the key"
+    );
+
+    // An incumbent holds it, so the candidate parks. The wait runs as a
+    // task from here on, with the fallback re-read set past every
+    // timeout in this test, so nothing but the delete can end it.
+    let waiting = {
+        let standby = Arc::clone(&standby);
+        let cancel = cancel.clone();
+        tokio::spawn(async move { standby.await_election_opening(&cancel).await })
+    };
+    // Generous, because the point of the window is to let the wait
+    // reach its read and park: a runner slow enough to still be reading
+    // when the revoke lands would see the read return no leader and
+    // finish for the wrong reason.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        !waiting.is_finished(),
+        "a candidate must not enter an election another coordinator holds"
+    );
+
+    // A write to the key that is not a deletion must not end the wait.
+    // Overwriting it in place produces a Put and no Delete, which is
+    // exactly what a predicate matching the wrong event type would
+    // accept. No coordinator writes the key that way — campaigning is a
+    // create, guarded on the key being absent — so the event is built
+    // here rather than provoked, to hold the discriminator itself.
+    let leader_key = format!("{prefix}coordinator/leader");
+    let mut raw = etcd_client::Client::connect([ETCD_ENDPOINT], None)
+        .await
+        .expect("connect raw etcd client");
+    raw.put(
+        leader_key.clone(),
+        r#"{"holder":"incumbent","lease_id":0}"#,
+        None,
+    )
+    .await
+    .expect("overwrite the leader key");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !waiting.is_finished(),
+        "a write that is not a deletion must not open the election"
+    );
+
+    // Now the deletion, with a successor taking the key back at once so
+    // a re-read can never be what ends the wait — only the delete event
+    // can. etcd rejects a delete and a put of one key in a single
+    // transaction, so a one-round-trip window remains; a defect large
+    // enough to matter here needs seconds, not that.
+    raw.delete(leader_key, None)
+        .await
+        .expect("delete the leader key");
+    let successor_lease = store.grant_lease(60).await.expect("grant lease");
+    assert!(
+        store
+            .try_acquire_leadership("successor", successor_lease)
+            .await
+            .expect("successor campaign"),
+        "the successor must take the key back"
+    );
+    tokio::time::timeout(WAIT_TIMEOUT, waiting)
+        .await
+        .expect("the watch must wake the candidate when the leader goes")
+        .expect("the waiting task must not panic")
+        .expect("watching the leader key must succeed");
+}
+
+/// A handoff replaced in place — cancelled and re-issued in one
+/// transaction — must still reach a pod the successor no longer names.
+///
+/// A replacement overwrites the handoff key rather than deleting it, so
+/// the old owner sees a single put whose payload names two other pods.
+/// Nothing in that payload says the fence this pod is holding should
+/// come off, and only what it still holds locally does. A pod that
+/// skipped the event would keep rejecting writes for a partition the
+/// durable state still assigns to it, until the reconcile tick noticed.
+///
+/// This pins the local-state disjunct as a whole, not either term: the
+/// pod here holds a warm and a fence, so removing one leaves the other.
+/// `restarted_old_owner_serves_again_after_handoff_cancelled` and
+/// `pod_releases_partition_when_cancelled_handoff_leaves_it_unassigned`
+/// are what hold the fence and the warm individually.
+#[tokio::test]
+async fn a_replaced_handoff_reaches_the_old_owner_it_no_longer_names() {
+    let store = test_store("handoff-replaced-old-owner").await;
+    let cancel = CancellationToken::new();
+
+    let pod = start_pod(Arc::clone(&store), "replaced-pod-a", cancel.clone());
+
+    let check_store = Arc::clone(&store);
+    wait_for_condition(WAIT_TIMEOUT, POLL_INTERVAL, || {
+        let store = Arc::clone(&check_store);
+        async move {
+            store
+                .list_pods()
+                .await
+                .map(|pods| pods.iter().any(|p| p.pod_name == "replaced-pod-a"))
+                .unwrap_or(false)
+        }
+    })
+    .await;
+
+    // Take ownership of partition 0 through the real acquisition path, so
+    // the assignment names this pod.
+    put_handoff(&store, 0, None, "replaced-pod-a", HandoffPhase::Warming).await;
+    wait_for_event(&pod.events, HandoffEvent::Warmed(0)).await;
+    let warming = store
+        .get_handoff(0)
+        .await
+        .expect("get handoff")
+        .expect("handoff exists");
+    assert!(
+        store
+            .complete_handoff(0, &warming.handoff_id, HandoffPhase::Warming)
+            .await
+            .expect("complete"),
+        "complete_handoff must succeed"
+    );
+    store.delete_handoff(0).await.expect("cleanup");
+
+    // Move the partition away, leaving this pod drained and fenced.
+    put_handoff(
+        &store,
+        0,
+        Some("replaced-pod-a"),
+        "replaced-pod-b",
+        HandoffPhase::Draining,
+    )
+    .await;
+    wait_for_event(&pod.events, HandoffEvent::Drained(0)).await;
+
+    // The successor is written over the same key and names neither this
+    // pod nor anything it holds. The assignment still names it, so it
+    // must resume rather than stay fenced.
+    put_handoff(
+        &store,
+        0,
+        Some("replaced-pod-b"),
+        "replaced-pod-c",
+        HandoffPhase::Freezing,
+    )
+    .await;
+    wait_for_event(&pod.events, HandoffEvent::Resumed(0)).await;
+
+    cancel.cancel();
+}
+
+/// A plan records its freeze-quorum membership once and points its
+/// handoffs at it, rather than writing the router fleet into each one.
+///
+/// Inlining made a handoff record grow with the fleet and a plan
+/// transaction grow with the fleet times the partition count. At a few
+/// hundred of each that exceeded etcd's maximum request size, so the
+/// transaction was rejected and no partition moved at all. The same
+/// bytes were paid again by every list of handoffs.
+///
+/// The sweep is the other half: membership records outlive nothing, so
+/// without collection they accumulate one per plan forever.
+#[tokio::test]
+async fn a_plan_records_its_freeze_quorum_once_and_collects_it_after() {
+    let store = test_store("freeze-quorum-by-reference").await;
+    store.set_total_partitions(2).await.expect("set partitions");
+    let cancel = CancellationToken::new();
+
+    // A registered router that never acks parks every handoff in
+    // Freezing, so the records under test stay put while the test reads
+    // them.
+    let lease_id = store.grant_lease(60).await.expect("grant lease");
+    store
+        .register_router(
+            &RegisteredRouter {
+                router_name: "fqr-router".to_string(),
+                registered_at: 0,
+                last_heartbeat: 0,
+            },
+            lease_id,
+        )
+        .await
+        .expect("register router");
+
+    let _pod = start_pod(Arc::clone(&store), "fqr-pod", cancel.clone());
+    let _coordinator = start_coordinator(
+        Arc::clone(&store),
+        Arc::new(StickyBalancedStrategy),
+        cancel.clone(),
+    );
+
+    let check = Arc::clone(&store);
+    wait_for_condition(WAIT_TIMEOUT, POLL_INTERVAL, || {
+        let store = Arc::clone(&check);
+        async move {
+            store
+                .list_handoffs()
+                .await
+                .map(|handoffs| {
+                    !handoffs.is_empty()
+                        && handoffs.iter().all(|h| h.phase == HandoffPhase::Freezing)
+                })
+                .unwrap_or(false)
+        }
+    })
+    .await;
+
+    let handoffs = store.list_handoffs().await.expect("list handoffs");
+    let referenced: HashSet<String> = handoffs
+        .iter()
+        .filter_map(|h| h.freeze_quorum_ref.clone())
+        .collect();
+    assert_eq!(
+        referenced.len(),
+        1,
+        "every handoff of one plan must point at the same membership record"
+    );
+    for handoff in &handoffs {
+        assert!(
+            handoff.freeze_quorum.is_none(),
+            "the membership must not also be written into the handoff"
+        );
+    }
+
+    let id = referenced.into_iter().next().expect("a referenced id");
+    let members = store
+        .get_freeze_quorum(&id)
+        .await
+        .expect("read membership")
+        .expect("the plan must write the record it points at");
+    assert_eq!(
+        members,
+        vec!["fqr-router".to_string()],
+        "the record must hold the routers registered when the plan ran"
+    );
+
+    // Nothing refers to it once the handoffs are gone, so the sweep on
+    // the coordinator's reconcile tick must take it.
+    for handoff in &handoffs {
+        store
+            .delete_handoff(handoff.partition)
+            .await
+            .expect("delete handoff");
+    }
+    let check = Arc::clone(&store);
+    let swept_id = id.clone();
+    wait_for_condition(WAIT_TIMEOUT, POLL_INTERVAL, || {
+        let store = Arc::clone(&check);
+        let id = swept_id.clone();
+        async move {
+            store
+                .get_freeze_quorum(&id)
+                .await
+                .map(|members| members.is_none())
+                .unwrap_or(false)
+        }
+    })
+    .await;
+
+    cancel.cancel();
+}
+
+/// A freeze-quorum reference that no longer resolves must read as
+/// "membership unknown", never as "membership empty".
+///
+/// The two are one `Option` apart and sit on opposite sides of the
+/// safety argument. Unknown falls back to requiring every live router,
+/// which can only delay a handoff. Empty requires nobody, which would
+/// advance a handoff out of Freezing before any router had stopped
+/// routing to the old owner — the state the freeze exists to prevent.
+#[tokio::test]
+async fn a_freeze_quorum_reference_that_is_gone_requires_every_live_router() {
+    let store = test_store("freeze-quorum-dangling-ref").await;
+
+    let mut handoff = HandoffState {
+        partition: 0,
+        old_owner: Some("pod-old".to_string()),
+        new_owner: "pod-new".to_string(),
+        new_owner_address: None,
+        phase: HandoffPhase::Freezing,
+        started_at: 0,
+        handoff_id: "handoff-dangling".to_string(),
+        freeze_quorum: None,
+        freeze_quorum_ref: Some("never-written".to_string()),
+        created_at_ms: 0,
+        phase_entered_at_ms: 0,
+    };
+
+    let quorum = store
+        .resolve_freeze_quorum(&handoff)
+        .await
+        .expect("resolving must not error");
+    assert!(
+        quorum.is_none(),
+        "a reference with no record must resolve to unknown, not to an empty membership"
+    );
+
+    let routers = [
+        RegisteredRouter {
+            router_name: "router-0".to_string(),
+            registered_at: 0,
+            last_heartbeat: 0,
+        },
+        RegisteredRouter {
+            router_name: "router-1".to_string(),
+            registered_at: 0,
+            last_heartbeat: 0,
+        },
+    ];
+    let acks = [RouterFreezeAck {
+        router_name: "router-0".to_string(),
+        partition: 0,
+        acked_at: 0,
+        acked_at_ms: 0,
+        handoff_id: handoff.handoff_id.clone(),
+    }];
+    assert!(
+        !freeze_quorum_met(&routers, &acks, &handoff, quorum.as_deref()),
+        "one ack of two live routers must not satisfy an unresolvable membership"
+    );
+
+    // An inline membership on an older record still resolves to itself.
+    handoff.freeze_quorum_ref = None;
+    handoff.freeze_quorum = Some(vec!["router-0".to_string()]);
+    let quorum = store
+        .resolve_freeze_quorum(&handoff)
+        .await
+        .expect("resolving must not error");
+    assert!(
+        freeze_quorum_met(&routers, &acks, &handoff, quorum.as_deref()),
+        "a record carrying its membership inline must still be judged by it"
+    );
+}
+
+/// A handoff cancelled while its new owner is still warming must reach
+/// that pod.
+///
+/// A new owner records its warm only once `warm_partition` returns, and
+/// it holds no fence, so for the whole replay it holds no local state
+/// for the partition — and a long warm is exactly what a deadline
+/// cancels. Deciding involvement from local state alone drops the
+/// deletion there, leaving the pod to finish a warm for a handoff that
+/// no longer exists and hold the cache until a reconcile tick notices.
+/// This pod's reconcile tick is parked, so only the event path can
+/// produce the release.
+#[tokio::test]
+async fn a_handoff_cancelled_mid_warm_reaches_the_pod_still_warming() {
+    let store = test_store("cancel-mid-warm").await;
+    let cancel = CancellationToken::new();
+
+    let pod = start_pod_gated(Arc::clone(&store), "mid-warm-pod", 4, cancel.clone());
+
+    let check = Arc::clone(&store);
+    wait_for_condition(WAIT_TIMEOUT, POLL_INTERVAL, || {
+        let store = Arc::clone(&check);
+        async move {
+            store
+                .list_pods()
+                .await
+                .map(|pods| pods.iter().any(|p| p.pod_name == "mid-warm-pod"))
+                .unwrap_or(false)
+        }
+    })
+    .await;
+
+    // Acquire partition 0 as the new owner of a fresh assignment. The
+    // gate is shut, so the warm parks and the pod holds nothing for the
+    // partition yet.
+    put_handoff(&store, 0, None, "mid-warm-pod", HandoffPhase::Warming).await;
+    wait_for_condition(WAIT_TIMEOUT, POLL_INTERVAL, || {
+        let in_flight = Arc::clone(&pod.warms_in_flight);
+        async move {
+            in_flight
+                .lock()
+                .expect("warms in flight lock poisoned")
+                .get(&0)
+                .is_some_and(|count| *count > 0)
+        }
+    })
+    .await;
+    assert!(
+        !pod.events.lock().await.contains(&HandoffEvent::Warmed(0)),
+        "the warm must still be parked at the gate"
+    );
+
+    // Cancel it out from under the warm, then let the warm finish.
+    store.delete_handoff(0).await.expect("delete handoff");
+    pod.gates.open(0);
+
+    // Nothing assigns the partition to this pod, so converging on the
+    // deletion must release what the warm installed.
+    wait_for_event(&pod.events, HandoffEvent::Released(0)).await;
+
+    cancel.cancel();
+}
+
+/// A leader that disappears between a standby's read and its watch is
+/// still delivered to that watch.
+///
+/// This is the ordering a standby cannot avoid: it reads the leader key,
+/// then attaches a watch, and the leader can go in between. Anchoring
+/// the watch at the revision the read returned replays that deletion;
+/// anchoring at "now" drops it, which looks identical in any test that
+/// lets the watch attach first — and leaves a candidate parked until its
+/// fallback re-read, on top of the lease TTL it already waited out.
+///
+/// Driven through the two store calls the standby loop makes, in that
+/// order, rather than through the loop: the deletion has to land between
+/// them, and no amount of racing the loop produces that ordering on
+/// demand. What this pins is the store contract the loop depends on —
+/// that a watch anchored on a read's revision replays what the read
+/// missed. The loop's own use of it is two adjacent lines.
+#[tokio::test]
+async fn a_leader_that_goes_between_the_read_and_the_watch_is_still_delivered() {
+    let store = test_store("standby-watch-anchor").await;
+
+    let lease_id = store.grant_lease(60).await.unwrap();
+    assert!(
+        store
+            .try_acquire_leadership("incumbent", lease_id)
+            .await
+            .unwrap(),
+        "the test's own leader must take the key"
+    );
+
+    // The read a standby makes, then the deletion, then the watch.
+    let (leader, revision) = store
+        .get_leader_with_revision()
+        .await
+        .expect("reading the leader key must succeed");
+    assert!(
+        leader.is_some(),
+        "the incumbent must be visible to the read"
+    );
+
+    store.revoke_lease(lease_id).await.unwrap();
+
+    let mut stream = store
+        .watch_leader_from(revision + 1)
+        .await
+        .expect("watching the leader key must succeed");
+
+    let delivered = tokio::time::timeout(WAIT_TIMEOUT, async {
+        loop {
+            let Ok(Some(response)) = stream.message().await else {
+                return false;
+            };
+            if response
+                .events()
+                .iter()
+                .any(|event| event.event_type() == EventType::Delete)
+            {
+                return true;
+            }
+        }
+    })
+    .await
+    .expect("the watch must deliver the deletion it missed, not wait for a new one");
+
+    assert!(
+        delivered,
+        "a watch anchored on the read's revision must replay the deletion"
+    );
+}
+
+/// The sweep must spare a membership record a live handoff refers to.
+///
+/// Its safety rests on the filter, and on reading the record ids before
+/// the handoffs so anything written in between is not a candidate. Drop
+/// the filter and the sweep deletes memberships out from under handoffs
+/// still in Freezing; each then falls back to requiring every live
+/// router, so a rebalance slows to whichever router is slowest to ack.
+///
+/// This pins the filter. The read ordering it does not pin — the window
+/// is a single round trip and the ordering lives at the call site, not
+/// in the swept function — so reversing those two reads passes here.
+#[tokio::test]
+async fn the_sweep_spares_a_membership_a_live_handoff_refers_to() {
+    let store = test_store("freeze-quorum-sweep-spares").await;
+    store.set_total_partitions(2).await.expect("set partitions");
+    let cancel = CancellationToken::new();
+
+    // A registered router that never acks parks the handoffs in
+    // Freezing, so their membership stays referenced while the sweep
+    // runs against it repeatedly.
+    let lease_id = store.grant_lease(60).await.expect("grant lease");
+    store
+        .register_router(
+            &RegisteredRouter {
+                router_name: "sweep-router".to_string(),
+                registered_at: 0,
+                last_heartbeat: 0,
+            },
+            lease_id,
+        )
+        .await
+        .expect("register router");
+
+    let _pod = start_pod(Arc::clone(&store), "sweep-pod", cancel.clone());
+    let _coordinator = start_coordinator(
+        Arc::clone(&store),
+        Arc::new(StickyBalancedStrategy),
+        cancel.clone(),
+    );
+
+    let check = Arc::clone(&store);
+    wait_for_condition_named(
+        WAIT_TIMEOUT,
+        POLL_INTERVAL,
+        "a referenced membership",
+        || {
+            let store = Arc::clone(&check);
+            async move {
+                store
+                    .list_handoffs()
+                    .await
+                    .map(|handoffs| {
+                        !handoffs.is_empty()
+                            && handoffs.iter().all(|h| {
+                                h.phase == HandoffPhase::Freezing && h.freeze_quorum_ref.is_some()
+                            })
+                    })
+                    .unwrap_or(false)
+            }
+        },
+    )
+    .await;
+
+    let id = store
+        .list_handoffs()
+        .await
+        .expect("list handoffs")
+        .first()
+        .and_then(|h| h.freeze_quorum_ref.clone())
+        .expect("a referenced membership id");
+
+    // The coordinator's reconcile tick sweeps every 500ms in these
+    // tests, so this spans several passes over a record that is still
+    // referenced throughout.
+    for _ in 0..6 {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(
+            store
+                .get_freeze_quorum(&id)
+                .await
+                .expect("reading the membership must succeed")
+                .is_some(),
+            "the sweep must not collect a membership a Freezing handoff still refers to"
+        );
+    }
+
+    cancel.cancel();
+}
+
+/// A coordinator that cannot reach etcd keeps trying, and still stops
+/// promptly when asked to.
+///
+/// It has no budget: coordination fails over to a peer for free on every
+/// term ending, a restart cannot mend an unwell etcd, and the process it
+/// would take down also serves person writes and strong reads. So the
+/// contract is retry-and-report, and both halves matter — a coordinator
+/// that gave up would shed routing capacity during an etcd event, and
+/// one that ignored cancellation would hold shutdown past its grace
+/// period.
+#[tokio::test]
+async fn a_coordinator_that_cannot_reach_etcd_keeps_trying_and_still_stops_on_request() {
+    let proxy = FlakyProxy::start("127.0.0.1:2379").await;
+    let prefix = format!("/test-coordinator-retries-{}/", uuid::Uuid::new_v4());
+    // Connect while the proxy is healthy: the failure under test is a
+    // connection that dies later, not one that never opened.
+    let store = store_at(&proxy.endpoint, &prefix).await;
+
+    let coordinator = Coordinator::new(
+        Arc::clone(&store),
+        CoordinatorConfig {
+            name: "retrying-coordinator".to_string(),
+            // Small, because the pace doubles: the attempt count this
+            // test needs has to fit inside its timeout.
+            run_retry_backoff: Duration::from_millis(1),
+            ..Default::default()
+        },
+        Arc::new(StickyBalancedStrategy),
+        None,
+    );
+    // Blackholed before the coordinator starts, so its very first
+    // campaign fails: otherwise a campaign that slips through ends its
+    // term by abdication, which is a different arm from the one under
+    // test.
+    proxy.set_blackholed(true);
+    let cancel = CancellationToken::new();
+    let token = cancel.clone();
+    let running = tokio::spawn(async move { coordinator.run(token).await });
+
+    // Counting attempts rather than waiting a fixed span, which once let
+    // this test pass with a budget of ten re-added: ten paced failures
+    // outlast three seconds. Each failed attempt opens one connection
+    // through the blackholed proxy, so the threshold below is twelve
+    // attempts — the backoff sums to about two seconds by then, which is
+    // what the run takes.
+    //
+    // That rules out a budget of twelve or fewer, which is what the ten
+    // was. It does not rule out every budget — the coordinator also
+    // carried a twenty, and a twenty would still be alive here. Raising
+    // the threshold past it is what that would take, and the pace
+    // doubles to a fifteen-second cap, so twenty attempts cost two
+    // minutes of wall clock.
+    let before = proxy.accepted();
+    wait_for_condition_named(
+        WAIT_TIMEOUT,
+        POLL_INTERVAL,
+        "more attempts than the budget that once passed this test",
+        || {
+            let seen = proxy.accepted().saturating_sub(before);
+            async move { seen >= 12 }
+        },
+    )
+    .await;
+    assert!(
+        !running.is_finished(),
+        "an unreachable etcd must not make the coordinator give up"
+    );
+
+    cancel.cancel();
+    tokio::time::timeout(WAIT_TIMEOUT, running)
+        .await
+        .expect("cancellation must stop the coordinator promptly")
+        .expect("the coordinator task must not panic");
+}
+
+/// A membership the cache has learned is absent still requires every
+/// live router, and does not read as "requires nobody".
+///
+/// Those are one `Option` apart and sit on opposite sides of the safety
+/// rule: absent means unknown, which widens the requirement, while an
+/// empty membership is a real snapshot that narrows it to nobody.
+/// Caching the second in place of the first would advance a handoff out
+/// of Freezing before any router had stopped routing to the old owner —
+/// and it would do so on the second resolution, not the first, so a test
+/// that resolves once would not see it.
+#[tokio::test]
+async fn a_cached_absent_membership_still_requires_every_live_router() {
+    let store = test_store("freeze-quorum-cached-absence").await;
+
+    let handoff = HandoffState {
+        partition: 0,
+        old_owner: Some("pod-old".to_string()),
+        new_owner: "pod-new".to_string(),
+        new_owner_address: None,
+        phase: HandoffPhase::Freezing,
+        started_at: 0,
+        handoff_id: "handoff-cached-absence".to_string(),
+        freeze_quorum: None,
+        freeze_quorum_ref: Some("never-written".to_string()),
+        created_at_ms: 0,
+        phase_entered_at_ms: 0,
+    };
+
+    let routers = [
+        RegisteredRouter {
+            router_name: "router-0".to_string(),
+            registered_at: 0,
+            last_heartbeat: 0,
+        },
+        RegisteredRouter {
+            router_name: "router-1".to_string(),
+            registered_at: 0,
+            last_heartbeat: 0,
+        },
+    ];
+    let acks = [RouterFreezeAck {
+        router_name: "router-0".to_string(),
+        partition: 0,
+        acked_at: 0,
+        acked_at_ms: 0,
+        handoff_id: handoff.handoff_id.clone(),
+    }];
+
+    // Resolve twice: the first read populates the cache, the second is
+    // answered from it. Both must say the same thing.
+    for pass in 1..=2 {
+        let quorum = store
+            .resolve_freeze_quorum(&handoff)
+            .await
+            .expect("resolving must not error");
+        assert!(
+            quorum.is_none(),
+            "pass {pass}: an absent record must stay unknown, not become an empty membership"
+        );
+        assert!(
+            !freeze_quorum_met(&routers, &acks, &handoff, quorum.as_deref()),
+            "pass {pass}: one ack of two live routers must not satisfy an absent membership"
+        );
+    }
+}
+
+/// A membership already read is answered from memory, not read again.
+///
+/// This is the whole point of holding it: every frozen partition of one
+/// plan shares an id, so resolving per handoff per reconcile pass is the
+/// read the cache exists to remove. Nothing else pins that it caches at
+/// all — the absence test passes just as well against a store that
+/// re-reads every time.
+///
+/// Deleting the record behind the cache is what makes the difference
+/// observable: a re-read would find nothing and widen the requirement,
+/// so still getting the membership proves it came from memory.
+#[tokio::test]
+async fn a_membership_already_read_is_answered_without_reading_again() {
+    let store = test_store("freeze-quorum-cache-hit").await;
+
+    let id = "cached-membership";
+    let members = vec!["router-0".to_string(), "router-1".to_string()];
+    store
+        .inner()
+        .put(
+            &format!("{}freeze_quorums/{id}", store.inner().prefix()),
+            &members,
+            None,
+        )
+        .await
+        .expect("write the membership");
+
+    let handoff = HandoffState {
+        partition: 0,
+        old_owner: Some("pod-old".to_string()),
+        new_owner: "pod-new".to_string(),
+        new_owner_address: None,
+        phase: HandoffPhase::Freezing,
+        started_at: 0,
+        handoff_id: "handoff-cache-hit".to_string(),
+        freeze_quorum: None,
+        freeze_quorum_ref: Some(id.to_string()),
+        created_at_ms: 0,
+        phase_entered_at_ms: 0,
+    };
+
+    assert_eq!(
+        store
+            .resolve_freeze_quorum(&handoff)
+            .await
+            .expect("first resolution"),
+        Some(members.clone()),
+        "the first resolution reads the record"
+    );
+
+    store
+        .delete_freeze_quorum(id)
+        .await
+        .expect("delete the membership");
+    assert!(
+        store
+            .get_freeze_quorum(id)
+            .await
+            .expect("read after delete")
+            .is_none(),
+        "the record must really be gone from etcd"
+    );
+
+    assert_eq!(
+        store
+            .resolve_freeze_quorum(&handoff)
+            .await
+            .expect("second resolution"),
+        Some(members),
+        "the second resolution must come from memory, not from etcd"
+    );
 }

@@ -342,11 +342,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     name: config.pod_name.clone(),
                     leader_lease_ttl: config.coordinator_lease_ttl,
                     keepalive_interval: config.coordinator_keepalive_interval(),
-                    election_retry_interval: config.coordinator_election_retry_interval(),
                     rebalance_debounce_interval: config.coordinator_rebalance_debounce_interval(),
                     reconcile_interval: config.coordinator_reconcile_interval(),
                     handoff_deadline: config.coordinator_handoff_deadline(),
                     warming_deadline: config.coordinator_warming_deadline(),
+                    // The router exposes only the knobs it configures;
+                    // the rest keep the protocol's own defaults.
+                    ..CoordinatorConfig::default()
                 },
                 Arc::new(StickyBalancedStrategy),
                 k8s_awareness,
@@ -354,9 +356,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             tokio::spawn(async move {
                 let _guard = coordinator_handle.process_scope();
-                if let Err(e) = coordinator.run(coordinator_handle.shutdown_token()).await {
-                    coordinator_handle.signal_failure(format!("Coordinator error: {e}"));
-                }
+                // No failure path back into the lifecycle manager on
+                // purpose. Coordination that cannot proceed does not
+                // want this process gone: the election lease is revoked
+                // on every term ending and a peer takes over in
+                // milliseconds, a restart cannot mend an unwell etcd,
+                // and this process is also serving person writes and
+                // strong reads. It retries and reports instead.
+                coordinator.run(coordinator_handle.shutdown_token()).await;
                 k8s_cancel.cancel();
             });
         } else {
@@ -436,6 +443,14 @@ fn install_metrics_recorder() -> PrometheusHandle {
     // "4.7s" regardless of the real value. The top still reaches far
     // past the handoff deadline so a stall is never collapsed into
     // +Inf.
+    // Must stay equal to `common_metrics::ETCD_PAYLOAD_SIZE_BUCKETS_BYTES`,
+    // which every binary using the shared recorder gets. This binary
+    // builds its own, and the router does not depend on that crate — but
+    // the metric is emitted by the store layer in both, so one name with
+    // two ladders across jobs cannot be aggregated.
+    const ETCD_PAYLOAD_SIZE_BUCKETS_BYTES: &[f64] = &[
+        1024.0, 8192.0, 65536.0, 262144.0, 524288.0, 1048576.0, 1572864.0, 2097152.0, 4194304.0,
+    ];
     const HANDOFF_PHASE_BUCKETS: &[f64] = &[
         50.0, 250.0, 500.0, 1000.0, 1500.0, 2000.0, 3000.0, 5000.0, 7500.0, 10000.0, 15000.0,
         30000.0, 60000.0, 120000.0, 300000.0, 600000.0,
@@ -453,6 +468,16 @@ fn install_metrics_recorder() -> PrometheusHandle {
         .set_buckets_for_metric(
             Matcher::Prefix("personhog_router_response_size".into()),
             RESPONSE_SIZE_BUCKETS,
+        )
+        .expect("valid buckets")
+        .set_buckets_for_metric(
+            Matcher::Full("personhog_coordination_plan_bytes".into()),
+            ETCD_PAYLOAD_SIZE_BUCKETS_BYTES,
+        )
+        .expect("valid buckets")
+        .set_buckets_for_metric(
+            Matcher::Full("assignment_coordination_etcd_payload_bytes".into()),
+            ETCD_PAYLOAD_SIZE_BUCKETS_BYTES,
         )
         .unwrap()
         .set_buckets_for_metric(

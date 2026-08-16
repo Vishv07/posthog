@@ -371,6 +371,7 @@ impl PodHandle {
     /// its registration fast — a registered but non-acking router would
     /// stall every freeze quorum until the phase deadline.
     pub async fn run(&self, cancel: CancellationToken) -> Result<()> {
+        util::preregister_pod_metrics();
         let mut consecutive_failures: u32 = 0;
         // Set by the coordination loop whenever it applies real work
         // (a convergence completed); consumed by each failure note to
@@ -1023,6 +1024,32 @@ impl PodHandle {
         Ok((partitions, rev_a.min(rev_h)))
     }
 
+    /// Whether this pod still holds something for the partition: a warm
+    /// cache or a write fence. Local state outlives the durable record
+    /// that created it, which is what makes a pod care about a handoff
+    /// that no longer names it — a cancellation leaves the old owner
+    /// fenced, and only the fence says so.
+    async fn holds_local_state(&self, partition: u32) -> bool {
+        self.warmed_partitions.lock().await.contains_key(&partition)
+            || self.fenced_partitions.lock().await.contains(&partition)
+    }
+
+    /// Whether an event for `partition` concerns this pod: it holds
+    /// state for it, or it is converging it right now.
+    ///
+    /// The in-flight half covers the window where a pod is doing the most
+    /// work and holding the least state to show for it. A new owner
+    /// records its warm only once `warm_partition` returns, so for the
+    /// whole replay it is in neither map — and that is exactly when a
+    /// long warm is most likely to be cancelled out from under it.
+    /// Skipping the event there would leave the pod finishing a warm for
+    /// a handoff that no longer exists, then holding the cache until the
+    /// reconcile tick noticed. Dispatching instead coalesces onto the
+    /// running convergence, so it re-derives once the warm completes.
+    async fn is_involved(&self, partition: u32, in_flight: &HashSet<u32>) -> bool {
+        in_flight.contains(&partition) || self.holds_local_state(partition).await
+    }
+
     /// Re-derive and apply the desired state for one partition from fresh
     /// point reads. Every watch event is just a signal to look again —
     /// convergence acts on observed durable state, never on remembered
@@ -1474,6 +1501,15 @@ impl PodHandle {
                 msg = stream.message() => {
                     let resp = msg?.ok_or_else(|| Error::invalid_state("handoff watch stream ended".to_string()))?;
                     for event in resp.events() {
+                        let mut unreadable = false;
+                        // Every pod watches every handoff, so a fleet-wide
+                        // rebalance delivers one event per partition to
+                        // every pod. Converging on all of them costs two
+                        // point reads each, and all but one pod's are
+                        // answered by state that cannot have changed for
+                        // it. Convergence still reads durable state
+                        // rather than trusting the payload; the payload
+                        // only decides whether to look.
                         let partition = match event.event_type() {
                             EventType::Put => match parse_watch_value::<HandoffState>(event) {
                                 Ok(handoff) => {
@@ -1482,18 +1518,47 @@ impl PodHandle {
                                         handoff.phase,
                                         handoff.phase_entered_at_ms,
                                     );
-                                    Some(handoff.partition)
+                                    let pod = &self.config.pod_name;
+                                    let named = handoff.old_owner.as_deref() == Some(pod.as_str())
+                                        || handoff.new_owner == *pod;
+                                    if named
+                                        || self.is_involved(handoff.partition, &in_flight).await
+                                    {
+                                        Some(handoff.partition)
+                                    } else {
+                                        None
+                                    }
                                 }
                                 Err(e) => {
                                     tracing::error!(pod = %self.config.pod_name, error = %e, "failed to parse handoff");
+                                    unreadable = true;
                                     None
                                 }
                             },
-                            EventType::Delete => event
+                            // A delete carries no owners, so only this
+                            // pod's own involvement can decide. That is
+                            // the case that matters: a cancelled handoff
+                            // has to reach the old owner holding its
+                            // fence, and the new owner still warming for
+                            // it.
+                            EventType::Delete => match event
                                 .kv()
                                 .and_then(|kv| from_utf8(kv.key()).ok())
-                                .and_then(store::extract_partition_from_key),
+                                .and_then(store::extract_partition_from_key)
+                            {
+                                Some(p) if self.is_involved(p, &in_flight).await => Some(p),
+                                Some(_) => None,
+                                None => {
+                                    unreadable = true;
+                                    None
+                                }
+                            },
                         };
+                        util::record_handoff_event_disposition(match (partition, unreadable) {
+                            (Some(_), _) => "converged",
+                            (None, true) => "unreadable",
+                            (None, false) => "skipped",
+                        });
                         if let Some(partition) = partition {
                             dispatch(
                                 self,
@@ -1676,6 +1741,7 @@ mod tests {
             started_at: 0,
             handoff_id: "h-test".to_string(),
             freeze_quorum: None,
+            freeze_quorum_ref: None,
             created_at_ms: 0,
             phase_entered_at_ms: 0,
             new_owner_address: None,

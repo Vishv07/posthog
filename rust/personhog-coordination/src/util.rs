@@ -68,6 +68,36 @@ pub(crate) fn note_run_failure(
     *consecutive < budget
 }
 
+/// Log and count a coordination-run failure for a component that has no
+/// budget to spend.
+///
+/// The coordinator is the one such component. Its work fails over to a
+/// peer for free on every term ending, a restart cannot fix an unwell
+/// etcd, and the process it would take down serves person writes and
+/// strong reads — so it retries indefinitely and surfaces each failure
+/// instead of counting toward giving up. This shares
+/// `run_restarts_total` with the components that do give up, because the
+/// question an operator asks of that series is the same either way.
+pub(crate) fn record_run_failure(
+    component: &'static str,
+    name: &str,
+    consecutive: u32,
+    err: &Error,
+) {
+    counter!(
+        "personhog_coordination_run_restarts_total",
+        "component" => component
+    )
+    .increment(1);
+    tracing::warn!(
+        component,
+        name,
+        error = %err,
+        consecutive,
+        "coordination run failed; retrying while the data plane keeps serving"
+    );
+}
+
 /// Maintain a lease keepalive until cancelled, treating connection
 /// trouble and lease loss as the different things they are. A broken or
 /// silent keepalive stream is evidence about one connection — the lease
@@ -174,6 +204,11 @@ pub async fn run_lease_keepalive(
             // never overstates how much lease is left. Anchoring at the
             // response would credit the round-trip delay to the lease.
             let sent = Instant::now();
+            // Renewals never pass through the store, so without this the
+            // fleet's highest-rate etcd call is absent from both the call
+            // attribution and the op-duration histogram — and after this
+            // crate stopped candidates polling the election, renewals are
+            // what is left at the top.
             let round = async {
                 keeper.keep_alive().await?;
                 match stream.message().await? {
@@ -185,12 +220,24 @@ pub async fn run_lease_keepalive(
                     Some(_) => Ok(true),
                 }
             };
-            let outcome = match tokio::time::timeout(left.min(interval), round).await {
-                Ok(r) => r,
-                Err(_) => Err(Error::invalid_state(format!(
-                    "keepalive round unanswered within {:?}",
-                    left.min(interval)
-                ))),
+            let outcome = {
+                // Scoped to the round alone. A timer living to the end of
+                // the iteration would drop after the pacing sleep below
+                // and record that instead — the interval, every time,
+                // whatever etcd actually did. The round is abandoned at
+                // `left.min(interval)` either way, so this measures
+                // renewal latency up to that bound and cannot show one
+                // beyond it; the margin, not this histogram, is what
+                // catches those.
+                crate::store::count_call("keep_alive_renewal");
+                let _renewal = assignment_coordination::store::OpTimer::new("keep_alive_renewal");
+                match tokio::time::timeout(left.min(interval), round).await {
+                    Ok(r) => r,
+                    Err(_) => Err(Error::invalid_state(format!(
+                        "keepalive round unanswered within {:?}",
+                        left.min(interval)
+                    ))),
+                }
             };
             match outcome {
                 Ok(true) => {
@@ -243,6 +290,34 @@ pub async fn run_lease_keepalive(
     }
 }
 
+/// Count one resolution that found no record — not one record lost. The
+/// handoff falls back to requiring every live router, so a nonzero rate
+/// explains a handoff slower to advance than its membership would
+/// suggest.
+///
+/// Read it as a rate, never as a population: every frozen partition
+/// referring to a lost record resolves once per reconcile pass, so a
+/// single missing record shows up as thousands per minute. That is the
+/// intent — the signal should persist while the condition does — but the
+/// magnitude says how much work is degraded, not how much is missing.
+pub fn record_unresolved_freeze_quorum() {
+    metrics::counter!("personhog_coordination_unresolved_freeze_quorums_total").increment(1);
+}
+
+/// Count a handoff watch event by what this pod did with it. The
+/// skipped share says how much of the fan-out this pod is not party to,
+/// and a skipped rate of zero during a rebalance means the scoping is
+/// not taking effect — so an event the pod could not read must not land
+/// there, or a fleet whose records this binary cannot parse reads as
+/// scoping working perfectly.
+pub fn record_handoff_event_disposition(disposition: &'static str) {
+    metrics::counter!(
+        "personhog_coordination_handoff_events_total",
+        "disposition" => disposition
+    )
+    .increment(1);
+}
+
 /// Records how long a handoff phase write took to reach this observer's
 /// watch stream. Only the non-terminal phases are recorded — those are
 /// the writes whose propagation gates protocol progress, while Complete
@@ -292,14 +367,77 @@ pub fn preregister_coordinator_metrics() {
             .increment(0);
     }
     metrics::counter!("personhog_coordination_elections_won_total").increment(0);
-    metrics::counter!("personhog_coordination_partition_releases_total").increment(0);
+    metrics::counter!("personhog_coordination_election_campaigns_total").increment(0);
+    metrics::counter!("personhog_coordination_abdications_total").increment(0);
+    metrics::counter!("personhog_coordination_freeze_quorum_sweep_failures_total").increment(0);
+    metrics::counter!("personhog_coordination_freeze_quorums_collected_total").increment(0);
+    // The coordinator's whole escalation story is this series, and its
+    // failures arrive in correlated bursts with quiet days between —
+    // exactly the delta a lazily-registered counter loses.
+    metrics::counter!(
+        "personhog_coordination_run_restarts_total",
+        "component" => "coordinator"
+    )
+    .increment(0);
+    metrics::counter!("personhog_coordination_unresolved_freeze_quorums_total").increment(0);
+    // Burst-shaped: these fire only during a mass cancellation, which is
+    // exactly the delta a lazily-registered series loses.
+    for reason in ["phase_deadline", "dead_new_owner"] {
+        metrics::counter!("personhog_coordination_handoffs_cancelled_total", "reason" => reason)
+            .increment(0);
+    }
+    for disposition in ["successor", "reaffirm", "delete"] {
+        metrics::counter!(
+            "personhog_coordination_handoffs_replaced_total",
+            "disposition" => disposition
+        )
+        .increment(0);
+    }
     metrics::gauge!("personhog_coordination_generation_hold_pods").set(0.0);
     metrics::gauge!("personhog_coordination_generation_capped_pods").set(0.0);
+}
+
+/// Same as [`preregister_coordinator_metrics`], for the counters a
+/// writer pod's coordination layer emits.
+pub fn preregister_pod_metrics() {
+    // Emitted by the pod, so it belongs here rather than beside the
+    // coordinator's counters — they run in different binaries, and a
+    // series registered where nothing emits it is a permanent zero.
+    metrics::counter!("personhog_coordination_partition_releases_total").increment(0);
+    metrics::counter!(
+        "personhog_coordination_run_restarts_total",
+        "component" => "pod"
+    )
+    .increment(0);
+    metrics::counter!(
+        "personhog_coordination_keepalive_retries_total",
+        "component" => "pod"
+    )
+    .increment(0);
+    for disposition in ["converged", "skipped", "unreadable"] {
+        metrics::counter!(
+            "personhog_coordination_handoff_events_total",
+            "disposition" => disposition
+        )
+        .increment(0);
+    }
 }
 
 /// Same as [`preregister_coordinator_metrics`], for the counters the
 /// router's coordination layer emits.
 pub fn preregister_router_coordination_metrics() {
+    for component in ["router", "coordinator"] {
+        metrics::counter!(
+            "personhog_coordination_keepalive_retries_total",
+            "component" => component
+        )
+        .increment(0);
+    }
+    metrics::counter!(
+        "personhog_coordination_run_restarts_total",
+        "component" => "router"
+    )
+    .increment(0);
     for outcome in ["revoked", "revoke_failed"] {
         metrics::counter!(
             "personhog_coordination_router_deregistered_total",
@@ -312,8 +450,71 @@ pub fn preregister_router_coordination_metrics() {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    use super::new_handoff_id;
+    use super::{new_handoff_id, note_run_failure};
+    use crate::error::Error;
+
+    /// Losing the election lease ends a leadership term but says nothing
+    /// about this process's health — a successor takes over and
+    /// reconciles. The coordinator's run loop tells the two apart on
+    /// this predicate: an abdication is paced and counted, an error is
+    /// paced and reported, and neither ends the process.
+    #[test]
+    fn an_abdication_is_not_a_process_failure() {
+        assert!(Error::leadership_lost().is_leadership_lost());
+        assert!(!Error::invalid_state("etcd unreachable").is_leadership_lost());
+        assert!(!Error::NotFound("handoffs/7".to_string()).is_leadership_lost());
+    }
+
+    /// Applied work has to clear the count, or sporadic errors spread
+    /// over hours add up to a restart of a healthy component. This is
+    /// the pod's and router's supervisor — both serve continuously, so a
+    /// stretch with no applied work is itself a symptom. The coordinator
+    /// does not use it: it idles legitimately, and it never gives up.
+    #[test]
+    fn applied_work_clears_the_failure_count() {
+        let progress = AtomicBool::new(false);
+        let err = Error::invalid_state("etcd unreachable");
+        let mut consecutive = 0u32;
+
+        for attempt in 1..3 {
+            assert!(
+                note_run_failure(&mut consecutive, &progress, 3, "pod", "p", &err),
+                "attempt {attempt} is within budget"
+            );
+        }
+
+        progress.store(true, Ordering::SeqCst);
+        assert!(
+            note_run_failure(&mut consecutive, &progress, 3, "pod", "p", &err),
+            "applied work resets the count"
+        );
+        assert_eq!(consecutive, 1);
+    }
+
+    /// And it must escalate when nothing succeeds in between — this is
+    /// the wedge it exists for: winning the election and then failing the
+    /// coordination loop returns an error every single time.
+    #[test]
+    fn an_unbroken_run_of_failures_exhausts_the_budget() {
+        let progress = AtomicBool::new(false);
+        let err = Error::invalid_state("list_handoffs failed");
+        let mut consecutive = 0u32;
+
+        assert!(note_run_failure(
+            &mut consecutive,
+            &progress,
+            2,
+            "pod",
+            "p",
+            &err
+        ));
+        assert!(
+            !note_run_failure(&mut consecutive, &progress, 2, "pod", "p", &err),
+            "the budget is spent, so the caller must stop retrying"
+        );
+    }
 
     /// Quorum correlation and cancellation detection hang off id
     /// uniqueness; ids minted in the same instant (a handoff cancelled
