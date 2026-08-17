@@ -691,6 +691,12 @@ class BillingViewset(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
                 detail_object = e.args[2]
                 if not isinstance(detail_object, dict):
                     raise
+                if detail_object.get("code") == "permission_denied":
+                    # The billing service gates these endpoints on the same flags we do, from its own
+                    # cache, so during a flag rollout or rollback the two can disagree for a cache
+                    # window. Surface that as the permission denial it is, rather than a generic 400
+                    # the frontend can only report as "failed to load".
+                    raise PermissionDenied(CanReadBillingUsageAndSpend.message)
                 return Response(
                     {
                         "statusText": e.args[0],
