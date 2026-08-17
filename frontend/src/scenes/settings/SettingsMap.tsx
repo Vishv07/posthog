@@ -35,6 +35,10 @@ import { PreAggregatedTablesSetting } from 'scenes/settings/environment/PreAggre
 import { ReplayTriggers } from 'scenes/settings/environment/ReplayTriggers'
 import { SessionsTableVersion } from 'scenes/settings/environment/SessionsTableVersion'
 import { SessionsV2JoinModeSettings } from 'scenes/settings/environment/SessionsV2JoinModeSettings'
+import {
+    TaskAgentMyPreferenceSettings,
+    TaskAgentProjectDefaultSettings,
+} from 'scenes/settings/environment/TaskAgentDefaultsSettings'
 import { urls } from 'scenes/urls'
 
 import {
@@ -339,6 +343,30 @@ export const SETTINGS_MAP: SettingSection[] = [
                     'See the latest PostHog AI features and control whether the changelog appears in the main UI.',
                 component: <MaxChangelogSettings />,
                 hideOn: [Realm.SelfHostedClickHouse, Realm.SelfHostedPostgres],
+            },
+        ],
+    },
+    {
+        level: 'environment',
+        id: 'environment-task-agents',
+        title: 'Task agents',
+        group: 'AI',
+        settings: [
+            {
+                id: 'task-agent-project-default',
+                title: 'Project default model',
+                description:
+                    'The model agent runs launch with when nobody picks one. Everyone on this project inherits it, for runs started from the task composer, Slack, and PostHog Code.',
+                component: <TaskAgentProjectDefaultSettings />,
+                keywords: ['ai', 'model', 'claude', 'codex', 'agent', 'tasks', 'default'],
+            },
+            {
+                id: 'task-agent-my-preference',
+                title: 'My default model',
+                description:
+                    'The model your own runs launch with, overriding the project default. Applies everywhere in PostHog: the task composer, Slack, and PostHog Code.',
+                component: <TaskAgentMyPreferenceSettings />,
+                keywords: ['ai', 'model', 'claude', 'codex', 'agent', 'tasks', 'preference'],
             },
         ],
     },
