@@ -47,7 +47,7 @@ from posthog.dataclasses import frozen
 from posthog.models.oauth import OAuthAccessToken, OAuthApplication
 from posthog.models.oauth_provisioning import UNLIMITED_OVERRIDE, PartnerTier
 from posthog.models.team.team_provisioning_config import TeamProvisioningConfig
-from posthog.token_bucket import BucketDecision, BucketUnavailable, Budget, consume, refund
+from posthog.token_bucket import BucketDecision, BucketUnavailable, Budget, consume, peek, refund
 
 from ee.api.agentic_provisioning.analytics import capture_provisioning_event
 from ee.api.agentic_provisioning.exceptions import Envelope, ProvisioningError
@@ -223,12 +223,17 @@ def partner_for_rate_limiting(request: Request) -> OAuthApplication | None:
     return app
 
 
+class TierBlocked(Exception):
+    """The partner's tier has no budget for this endpoint and no override exists."""
+
+
 def resolve_budget(declaration: BudgetDeclaration, partner: OAuthApplication) -> Budget | None:
     """The bucket to charge for this partner, or None when it is unlimited.
 
-    Raises the tier-blocked error when the tier multiplier is BLOCKED and no
-    override exists; an admin override outranks BLOCKED, so a specific partner
-    can be granted an endpoint without moving its whole tier.
+    Raises :class:`TierBlocked` (side-effect free, so introspection can call
+    this too) when the tier multiplier is BLOCKED and no override exists; an
+    admin override outranks BLOCKED, so a specific partner can be granted an
+    endpoint without moving its whole tier.
     """
     tier = partner.partner_tier
     multiplier = declaration.multipliers[tier]
@@ -244,11 +249,14 @@ def resolve_budget(declaration: BudgetDeclaration, partner: OAuthApplication) ->
         return Budget(burst=burst, per_hour=override)
 
     if multiplier == BLOCKED:
-        DECISIONS_COUNTER.labels(endpoint=declaration.endpoint, tier=tier, outcome="tier_blocked").inc()
-        capture_provisioning_event("rate_limited", "tier_blocked", partner=partner, endpoint=declaration.endpoint)
-        raise ProvisioningError("forbidden", TIER_BLOCKED_MESSAGE, status=403, envelope=declaration.envelope)
+        raise TierBlocked
 
     return Budget(burst=declaration.budget.burst * multiplier, per_hour=declaration.budget.per_hour * multiplier)
+
+
+def _bucket_key(declaration: BudgetDeclaration, partner: OAuthApplication, key_suffix: str = "") -> str:
+    key = f"{BUCKET_KEY_PREFIX}{declaration.endpoint}:{partner.id}"
+    return f"{key}:{key_suffix}" if key_suffix else key
 
 
 def charge_partner(
@@ -266,13 +274,16 @@ def charge_partner(
     can refund it and ``finalize_response`` can emit RateLimit-* headers.
     """
     tier = partner.partner_tier
-    budget = resolve_budget(declaration, partner)
+    try:
+        budget = resolve_budget(declaration, partner)
+    except TierBlocked:
+        DECISIONS_COUNTER.labels(endpoint=declaration.endpoint, tier=tier, outcome="tier_blocked").inc()
+        capture_provisioning_event("rate_limited", "tier_blocked", partner=partner, endpoint=declaration.endpoint)
+        raise ProvisioningError("forbidden", TIER_BLOCKED_MESSAGE, status=403, envelope=declaration.envelope)
     if budget is None:
         return
 
-    bucket_key = f"{BUCKET_KEY_PREFIX}{declaration.endpoint}:{partner.id}"
-    if key_suffix:
-        bucket_key = f"{bucket_key}:{key_suffix}"
+    bucket_key = _bucket_key(declaration, partner, key_suffix)
 
     decision = consume(bucket_key, budget)
     if isinstance(decision, BucketUnavailable):
@@ -370,6 +381,31 @@ def apply_rate_limit_headers(request: Request, response) -> None:
     response["RateLimit-Limit"] = str(ledger.decision.limit)
     response["RateLimit-Remaining"] = str(min(remaining, ledger.decision.limit))
     response["RateLimit-Reset"] = str(ledger.decision.reset)
+
+
+def describe_budgets(partner: OAuthApplication) -> dict[str, dict[str, object]]:
+    """Every declared endpoint's effective budget for this partner, with current
+    headroom where the bucket is partner-keyed. Backs the /limits introspection
+    endpoint; reads via peek, so it charges nothing."""
+    descriptions: dict[str, dict[str, object]] = {}
+    for endpoint, declaration in sorted(_REGISTRY.items()):
+        try:
+            budget = resolve_budget(declaration, partner)
+        except TierBlocked:
+            descriptions[endpoint] = {"blocked": True}
+            continue
+        if budget is None:
+            descriptions[endpoint] = {"unlimited": True}
+            continue
+        entry: dict[str, object] = {"per_hour": budget.per_hour, "burst": budget.burst}
+        # A keyed budget (e.g. per grant) has no single partner-level bucket to read.
+        if declaration.key is None:
+            decision = peek(_bucket_key(declaration, partner), budget)
+            if isinstance(decision, BucketDecision):
+                entry["remaining"] = decision.remaining
+                entry["reset"] = decision.reset
+        descriptions[endpoint] = entry
+    return descriptions
 
 
 def account_creation_daily_ceiling(partner: OAuthApplication, budget: Budget) -> None:
