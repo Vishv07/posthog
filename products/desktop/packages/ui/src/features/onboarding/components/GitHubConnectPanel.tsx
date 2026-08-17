@@ -105,7 +105,10 @@ export function GitHubConnectPanel() {
   const canTakeAction = !isConnecting && !timedOut && !hasConnectError;
   const isPendingApproval = isGithubConnectPendingApproval(connectError?.code);
 
-  const initiateConnect = (
+  // Records the start event and arms the in-flight ref so an unmount mid-flow
+  // reports as abandoned. Every path that begins a connect must go through this,
+  // including reconnect, or its "started" event has no abandoned counterpart.
+  const markConnectStarted = (
     flowType: OnboardingGithubConnectFlow,
     isRetry = false,
   ) => {
@@ -114,6 +117,13 @@ export function GitHubConnectPanel() {
       is_retry: isRetry,
     });
     inFlightConnectRef.current = { flowType, startedAtMs: Date.now() };
+  };
+
+  const initiateConnect = (
+    flowType: OnboardingGithubConnectFlow,
+    isRetry = false,
+  ) => {
+    markConnectStarted(flowType, isRetry);
     void handleConnectGitHub();
   };
 
@@ -373,10 +383,7 @@ export function GitHubConnectPanel() {
                             !isReconnecting
                           }
                           onClick={async () => {
-                            track(
-                              ANALYTICS_EVENTS.ONBOARDING_GITHUB_CONNECT_STARTED,
-                              { flow_type: "user_new", is_retry: true },
-                            );
+                            markConnectStarted("user_new", true);
                             setReconnectingInstallationId(installationId);
                             try {
                               await reconnect(
