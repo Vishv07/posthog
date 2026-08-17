@@ -261,7 +261,6 @@ describe("feature settingsStore cloud selections", () => {
     ["slotMachineMode", false, true],
     ["dismissibleUpdateBanners", false, true],
     ["showSidebarWorktrees", false, true],
-    ["githubConnectPendingSince", null, 1_700_000_000_000],
   ] as const)("rehydrates %s", async (field, initial, persisted) => {
     getItem.mockResolvedValue(
       JSON.stringify({ state: { [field]: persisted }, version: 0 }),
@@ -274,6 +273,22 @@ describe("feature settingsStore cloud selections", () => {
     await useSettingsStore.persist.rehydrate();
 
     expect(useSettingsStore.getState()[field]).toBe(persisted);
+  });
+
+  it("rehydrates githubConnectPending", async () => {
+    const persisted = { identity: "us:1", since: 1_700_000_000_000 };
+    getItem.mockResolvedValue(
+      JSON.stringify({
+        state: { githubConnectPending: persisted },
+        version: 0,
+      }),
+    );
+
+    useSettingsStore.setState({ githubConnectPending: null });
+
+    await useSettingsStore.persist.rehydrate();
+
+    expect(useSettingsStore.getState().githubConnectPending).toEqual(persisted);
   });
 
   it("flips _hasHydrated once the persisted snapshot lands", async () => {

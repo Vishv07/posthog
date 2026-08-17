@@ -95,23 +95,54 @@ describe("invalidation keys", () => {
 
 describe("computeApprovedAfterPending", () => {
   it("does not celebrate when nothing was pending", () => {
-    expect(computeApprovedAfterPending(null, Date.now())).toEqual({
+    expect(
+      computeApprovedAfterPending({
+        pending: null,
+        currentIdentity: "us:1",
+        nowMs: Date.now(),
+      }),
+    ).toEqual({
       shouldCelebrate: false,
       waitSeconds: 0,
     });
   });
 
-  it("celebrates and reports the elapsed wait when a pending timestamp is set", () => {
-    const pendingSince = 1_000;
-    const now = pendingSince + 90_000;
-    expect(computeApprovedAfterPending(pendingSince, now)).toEqual({
+  it("celebrates and reports the elapsed wait when the pending identity matches", () => {
+    const since = 1_000;
+    const now = since + 90_000;
+    expect(
+      computeApprovedAfterPending({
+        pending: { identity: "us:1", since },
+        currentIdentity: "us:1",
+        nowMs: now,
+      }),
+    ).toEqual({
       shouldCelebrate: true,
       waitSeconds: 90,
     });
   });
 
+  it("does not celebrate when the pending marker belongs to a different account", () => {
+    expect(
+      computeApprovedAfterPending({
+        pending: { identity: "us:1", since: 1_000 },
+        currentIdentity: "us:2",
+        nowMs: 91_000,
+      }),
+    ).toEqual({
+      shouldCelebrate: false,
+      waitSeconds: 0,
+    });
+  });
+
   it("never reports a negative wait if the clock moved backwards", () => {
-    expect(computeApprovedAfterPending(10_000, 1_000)).toEqual({
+    expect(
+      computeApprovedAfterPending({
+        pending: { identity: "us:1", since: 10_000 },
+        currentIdentity: "us:1",
+        nowMs: 1_000,
+      }),
+    ).toEqual({
       shouldCelebrate: true,
       waitSeconds: 0,
     });

@@ -1,3 +1,4 @@
+import type { PendingGithubApproval } from "@posthog/core/integrations/connectMachine";
 import type { UserRepositoryIntegrationRef } from "@posthog/core/integrations/repositories";
 import type {
   Adapter,
@@ -149,11 +150,13 @@ interface SettingsStore {
   setDefaultReasoningEffort: (effort: DefaultReasoningEffort) => void;
 
   // GitHub connect
-  // Epoch ms set when GitHub reports "needs org owner approval" for a connect
-  // attempt; null once approved (or never pending). Lets a later successful
-  // connect on any surface recognize it followed that wait and celebrate it.
-  githubConnectPendingSince: number | null;
-  setGithubConnectPendingSince: (value: number | null) => void;
+  // Set when GitHub reports "needs org owner approval" for a connect
+  // attempt, stamped with the identity of the account that was waiting;
+  // null once approved (or never pending). Lets a later successful connect
+  // on any surface recognize it followed that wait and celebrate it, without
+  // celebrating a different account's wait on the same device.
+  githubConnectPending: PendingGithubApproval | null;
+  setGithubConnectPending: (value: PendingGithubApproval | null) => void;
 
   // Notifications
   desktopNotifications: boolean;
@@ -371,9 +374,8 @@ export const useSettingsStore = create<SettingsStore>()(
         set({ defaultCloudMessagingMode: mode }),
 
       // GitHub connect
-      githubConnectPendingSince: null,
-      setGithubConnectPendingSince: (value) =>
-        set({ githubConnectPendingSince: value }),
+      githubConnectPending: null,
+      setGithubConnectPending: (value) => set({ githubConnectPending: value }),
 
       // Notifications
       ...NOTIFICATION_DEFAULTS,
@@ -568,7 +570,7 @@ export const useSettingsStore = create<SettingsStore>()(
         defaultCloudMessagingMode: state.defaultCloudMessagingMode,
 
         // GitHub connect
-        githubConnectPendingSince: state.githubConnectPendingSince,
+        githubConnectPending: state.githubConnectPending,
 
         // Notifications
         desktopNotifications: state.desktopNotifications,
@@ -655,6 +657,26 @@ export const useSettingsStore = create<SettingsStore>()(
     },
   ),
 );
+
+/**
+ * Runs `fn` once persisted settings have loaded, immediately if hydration
+ * already finished. Settings persist through an IPC round trip to the host
+ * (see rendererStorage.ts), so on a cold start a deep-link callback can drain
+ * before hydration completes; reading or writing store state before then
+ * races the rehydrate and gets silently overwritten.
+ */
+export function afterSettingsHydrated(fn: () => void): void {
+  if (useSettingsStore.getState()._hasHydrated) {
+    fn();
+    return;
+  }
+  const unsubscribe = useSettingsStore.subscribe((state) => {
+    if (state._hasHydrated) {
+      unsubscribe();
+      fn();
+    }
+  });
+}
 
 /**
  * The personalization to inject into sessions. Strictly either/or: while file

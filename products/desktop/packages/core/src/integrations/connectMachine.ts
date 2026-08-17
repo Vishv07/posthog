@@ -83,24 +83,34 @@ export function slackInvalidationKeys(): ReadonlyArray<ReadonlyArray<unknown>> {
   return [["integrations", "list"], ["integrations"]];
 }
 
+export interface PendingGithubApproval {
+  identity: string;
+  since: number;
+}
+
 export interface ApprovedAfterPendingOutcome {
   shouldCelebrate: boolean;
   waitSeconds: number;
 }
 
 /** Decides whether a successful connect follows an earlier "needs org owner
- * approval" outcome, and how long the wait was. `pendingSinceMs` is the
- * persisted timestamp set when that pending outcome first arrived; `null`
- * means there was nothing to wait on, so there is nothing to celebrate. */
-export function computeApprovedAfterPending(
-  pendingSinceMs: number | null,
-  nowMs: number,
-): ApprovedAfterPendingOutcome {
-  if (pendingSinceMs === null) {
+ * approval" outcome, and how long the wait was. `pending` is the persisted
+ * marker set when that pending outcome first arrived, stamped with the
+ * identity of the account that was waiting; `null` means there was nothing to
+ * wait on. The identity must match `currentIdentity` — the marker is device-
+ * global, so a different account signed in on the same machine must not
+ * celebrate someone else's wait. */
+export function computeApprovedAfterPending(params: {
+  pending: PendingGithubApproval | null;
+  currentIdentity: string | null;
+  nowMs: number;
+}): ApprovedAfterPendingOutcome {
+  const { pending, currentIdentity, nowMs } = params;
+  if (pending === null || pending.identity !== currentIdentity) {
     return { shouldCelebrate: false, waitSeconds: 0 };
   }
   return {
     shouldCelebrate: true,
-    waitSeconds: Math.max(0, Math.round((nowMs - pendingSinceMs) / 1000)),
+    waitSeconds: Math.max(0, Math.round((nowMs - pending.since) / 1000)),
   };
 }
