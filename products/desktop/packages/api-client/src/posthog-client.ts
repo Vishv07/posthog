@@ -238,6 +238,12 @@ export interface TaskListOptions {
   prState?: string;
   /** Filter by the CI rollup on the latest run's pull request (passing/failing/pending/none). */
   ciStatus?: string;
+  /** Only tasks the requesting user has pinned. */
+  pinned?: boolean;
+  /** Tasks carrying a thread comment written by this user ID. */
+  commentedBy?: number;
+  /** Tasks whose thread mentions this user ID. */
+  mentions?: number;
   /** List only archived tasks; the server excludes them by default. */
   archived?: boolean;
   /** Caller-side cap for surfaces that only show the newest few. */
@@ -2362,6 +2368,18 @@ export class PostHogAPIClient {
 
     if (options?.ciStatus) {
       params.ci_status = options.ciStatus;
+    }
+
+    if (options?.pinned) {
+      params.pinned = "true";
+    }
+
+    if (options?.commentedBy) {
+      params.commented_by = options.commentedBy;
+    }
+
+    if (options?.mentions) {
+      params.mentions = options.mentions;
     }
 
     if (options?.archived) {

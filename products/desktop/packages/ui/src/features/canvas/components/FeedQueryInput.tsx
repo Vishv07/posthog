@@ -1,6 +1,8 @@
 import {
+  AppWindowIcon,
   ArchiveIcon,
   AtIcon,
+  ChatCircleIcon,
   CheckCircleIcon,
   CircleHalfIcon,
   GitMergeIcon,
@@ -8,7 +10,9 @@ import {
   HashIcon,
   PackageIcon,
   PencilSimpleIcon,
+  PushPinIcon,
   UserCircleIcon,
+  UsersIcon,
   XIcon,
 } from "@phosphor-icons/react";
 import {
@@ -64,6 +68,24 @@ const KEY_SUGGESTIONS: Suggestion[] = [
     icon: keyIcon(<UserCircleIcon size={14} />),
   },
   {
+    insert: "commented-by:",
+    label: "commented-by:",
+    hint: "who commented on the thread",
+    icon: keyIcon(<ChatCircleIcon size={14} />),
+  },
+  {
+    insert: "mentions:",
+    label: "mentions:",
+    hint: "who the thread mentions",
+    icon: keyIcon(<AtIcon size={14} />),
+  },
+  {
+    insert: "involves:",
+    label: "involves:",
+    hint: "started or commented",
+    icon: keyIcon(<UsersIcon size={14} />),
+  },
+  {
     insert: "space:",
     label: "space:",
     hint: "tasks filed to a space",
@@ -84,14 +106,14 @@ const KEY_SUGGESTIONS: Suggestion[] = [
   {
     insert: "is:",
     label: "is:",
-    hint: "archived, running, done, failed",
+    hint: "archived, pinned, running, done, failed",
     icon: keyIcon(<ArchiveIcon size={14} />),
   },
   {
     insert: "origin:",
     label: "origin:",
     hint: "product that created the task",
-    icon: keyIcon(<AtIcon size={14} />),
+    icon: keyIcon(<AppWindowIcon size={14} />),
   },
   {
     insert: "pr:",
@@ -107,7 +129,7 @@ const KEY_SUGGESTIONS: Suggestion[] = [
   },
 ];
 
-const IS_VALUES = ["archived", "running", "done", "failed"];
+const IS_VALUES = ["archived", "pinned", "running", "done", "failed"];
 
 const PR_SUGGESTIONS: Suggestion[] = [
   {
@@ -378,7 +400,12 @@ export function FeedQueryInput({
       }
       case "created-by":
       case "author":
-      case "by": {
+      case "by":
+      case "commented-by":
+      case "commenter":
+      case "mentions":
+      case "mentioned":
+      case "involves": {
         const me: Suggestion[] = startsWith("@me")
           ? [
               {
@@ -462,13 +489,15 @@ export function FeedQueryInput({
             icon:
               v === "archived"
                 ? keyIcon(<ArchiveIcon size={14} />)
-                : statusDot(
-                    v === "running"
-                      ? "in_progress"
-                      : v === "done"
-                        ? "completed"
-                        : "failed",
-                  ),
+                : v === "pinned"
+                  ? keyIcon(<PushPinIcon size={14} />)
+                  : statusDot(
+                      v === "running"
+                        ? "in_progress"
+                        : v === "done"
+                          ? "completed"
+                          : "failed",
+                    ),
           })),
         };
       case "pr":

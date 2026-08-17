@@ -36,7 +36,13 @@ export function useFeedQueryPlan(query: string | undefined): {
 } {
   const normalized = query?.trim() ?? "";
   const parsed = useMemo(() => parseFeedQuery(normalized), [normalized]);
-  const needsMembers = parsed.tokens.some((t) => t.key === "created-by");
+  const needsMembers = parsed.tokens.some(
+    (t) =>
+      t.key === "created-by" ||
+      t.key === "commented-by" ||
+      t.key === "mentions" ||
+      t.key === "involves",
+  );
   const needsSpaces = parsed.tokens.some((t) => t.key === "space");
 
   const client = useOptionalAuthenticatedClient();
@@ -98,6 +104,9 @@ export function useTaskFeedResults(query: string | undefined): {
               archived: request.archived,
               prState: request.prState,
               ciStatus: request.ciStatus,
+              pinned: request.pinned,
+              commentedBy: request.commentedBy,
+              mentions: request.mentions,
             }) as unknown as Promise<Task[]>,
         ),
       );
