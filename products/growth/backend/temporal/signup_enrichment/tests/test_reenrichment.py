@@ -180,3 +180,22 @@ class TestReenrichOrganizationActivity(BaseTest):
 
         assert result == {"matched": False, "icp_score_status": "not_found"}
         assert pha_client.capture.call_args.kwargs["properties"]["icp_score_status"] == "not_found"
+
+    def test_skips_an_org_deleted_after_selection_without_writing_anything(self):
+        doomed = Organization.objects.create(name="doomed.example")
+        organization_id = str(doomed.id)
+        doomed.delete()
+
+        pha_client = MagicMock()
+        enrich = AsyncMock()
+        with (
+            patch(f"{_MODULE}.get_regional_ph_client", return_value=pha_client),
+            patch("products.growth.backend.enrichment.core.enrich_organization", enrich),
+        ):
+            result = async_to_sync(reenrich_organization_activity)(
+                ReenrichOrgInputs(organization_id=organization_id, distinct_id="signer", domain="stripe.com")
+            )
+
+        assert result == {"matched": False, "skipped": "organization_deleted"}
+        enrich.assert_not_awaited()
+        pha_client.capture.assert_not_called()

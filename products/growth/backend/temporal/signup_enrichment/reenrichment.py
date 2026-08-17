@@ -163,10 +163,21 @@ async def select_reenrichment_candidates_activity(inputs: IcpReenrichmentSweepIn
 @close_db_connections
 async def reenrich_organization_activity(inputs: ReenrichOrgInputs) -> dict[str, typing.Any]:
     """One org through the standard enrichment path, recheck-style, with its own event."""
+    from asgiref.sync import sync_to_async  # noqa: PLC0415
+
+    from posthog.models.organization import Organization  # noqa: PLC0415
+
     from products.growth.backend.enrichment.core import enrich_organization  # noqa: PLC0415
     from products.growth.backend.enrichment.providers import HarmonicEnrichmentProvider  # noqa: PLC0415
 
     logger = LOGGER.bind(organization_id=inputs.organization_id)
+
+    # Selection can be hours stale by the tail of a run, and the enrichment FKs skip DB
+    # constraints — without this recheck, an org deleted mid-sweep would get its rows and
+    # group properties recreated right after the deletion cascade removed them.
+    if not await sync_to_async(Organization.objects.filter(id=inputs.organization_id).exists)():
+        logger.info("icp_reenrichment_skipped_org_deleted")
+        return {"matched": False, "skipped": "organization_deleted"}
 
     pha_client = get_regional_ph_client()
     if pha_client is None:
