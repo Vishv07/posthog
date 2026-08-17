@@ -26,18 +26,14 @@ import type { ComposerSeed } from '../../logics/composerSeedLogic'
 import { modelCatalogueLogic } from '../../logics/modelCatalogueLogic'
 import { runnerPanelLogic } from '../../logics/runnerPanelLogic'
 import type { ActiveCreation } from '../../logics/runnerPanelLogic'
+import { taskRunDefaultsLogic } from '../../logics/taskRunDefaultsLogic'
 import { tasksLogic } from '../../logics/tasksLogic'
 import { toolStreamEventsLogic } from '../../logics/toolStreamEventsLogic'
 import { welcomeOverrideLogic } from '../../logics/welcomeOverrideLogic'
 import type { AttachedContextItem } from '../../types/contextTypes'
 import type { RepositoryConfig, Task } from '../../types/taskTypes'
 import type { TaskListParams } from '../../types/taskTypes'
-import {
-    buildRunCreateRequest,
-    DEFAULT_COMPOSER_EFFORT,
-    DEFAULT_COMPOSER_MODEL,
-    resolveEffortForModel,
-} from '../../utils/composerModels'
+import { buildRunCreateRequest, DEFAULT_COMPOSER_MODEL, resolveEffortForModel } from '../../utils/composerModels'
 import { DEFAULT_COMPOSER_MODE, type PermissionMode } from '../../utils/composerModes'
 import { wrapWithPosthogContext } from '../../utils/posthogContextBlock'
 
@@ -46,8 +42,11 @@ export type { ActiveCreation } from '../../logics/runnerPanelLogic'
 export interface TaskCreateForm {
     description: string
     repositoryConfig: RepositoryConfig
-    model: string
-    reasoningEffort: ReasoningEffortEnumApi
+    /** null = no explicit pick; the run launches with the server-resolved default (user preference
+     * over project default, else the built-in composer default). An explicit pick applies to this
+     * run only — the form resets to null after submit. */
+    model: string | null
+    reasoningEffort: ReasoningEffortEnumApi | null
     permissionMode: PermissionMode
 }
 
@@ -71,8 +70,8 @@ const EMPTY_TASK_FORM: TaskCreateForm = {
         integrationId: undefined,
         repository: undefined,
     },
-    model: DEFAULT_COMPOSER_MODEL,
-    reasoningEffort: DEFAULT_COMPOSER_EFFORT,
+    model: null,
+    reasoningEffort: null,
     permissionMode: DEFAULT_COMPOSER_MODE,
 }
 
@@ -86,14 +85,19 @@ export interface taskTrackerSceneLogicValues {
     currentProjectId: number | null // projectLogic
     activeCreation: ActiveCreation | null // runnerPanelLogic
     historyExpanded: boolean // runnerPanelLogic
+    claudeDefaultEffort: string | null // taskRunDefaultsLogic
+    claudeDefaultModel: string | null // taskRunDefaultsLogic
     repositories: string[] // tasksLogic
     taskListParams: TaskListParams // tasksLogic
     tasks: Task[] // tasksLogic
     overrideHeadlines: string[] | null // welcomeOverrideLogic
     activeSuggestionGroup: SuggestionGroup | null
     consentBlocked: boolean
+    displayEffort: ReasoningEffortEnumApi
     displayHeadline: string
+    displayModel: string
     headlineSeed: number
+    isDefaultSelection: boolean
     isSubmittingTask: boolean
     newTaskData: TaskCreateForm
     persistedRepositoryConfig: PersistedRepositoryConfig
@@ -296,6 +300,14 @@ export interface taskTrackerSceneLogicMeta {
     key: string
     __keaTypeGenInternalSelectorTypes: {
         displayHeadline: (overrideHeadlines: string[] | null, headlineSeed: number) => string
+        displayModel: (newTaskData: TaskCreateForm, claudeDefaultModel: string | null) => string
+        displayEffort: (
+            newTaskData: TaskCreateForm,
+            claudeDefaultEffort: string | null,
+            displayModel: string,
+            catalogue: ModelChoiceApi[]
+        ) => ReasoningEffortEnumApi
+        isDefaultSelection: (newTaskData: TaskCreateForm) => boolean
     }
 }
 
@@ -334,6 +346,8 @@ export const taskTrackerSceneLogic = kea<taskTrackerSceneLogicType>([
             ['overrideHeadlines'],
             modelCatalogueLogic,
             ['catalogue'],
+            taskRunDefaultsLogic,
+            ['claudeDefaultModel', 'claudeDefaultEffort'],
         ],
         actions: [
             runnerPanelLogic(props),
@@ -433,6 +447,32 @@ export const taskTrackerSceneLogic = kea<taskTrackerSceneLogicType>([
         ],
     }),
 
+    selectors({
+        // The pickers render these and a submit sends exactly these, so the composer can never
+        // show one model or effort while the run launches with another.
+        displayModel: [
+            (s) => [s.newTaskData, s.claudeDefaultModel],
+            (newTaskData: TaskCreateForm, claudeDefaultModel: string | null): string =>
+                newTaskData.model ?? claudeDefaultModel ?? DEFAULT_COMPOSER_MODEL,
+        ],
+        displayEffort: [
+            (s) => [s.newTaskData, s.claudeDefaultEffort, s.displayModel, s.catalogue],
+            (
+                newTaskData: TaskCreateForm,
+                claudeDefaultEffort: string | null,
+                displayModel: string,
+                catalogue: ModelChoiceApi[]
+            ): ReasoningEffortEnumApi =>
+                resolveEffortForModel(catalogue, newTaskData.reasoningEffort ?? claudeDefaultEffort, displayModel),
+        ],
+        // Neither picker touched: submit omits the triple so the backend resolves it, which also
+        // lets a warm run provisioned under the default match.
+        isDefaultSelection: [
+            (s) => [s.newTaskData],
+            (newTaskData: TaskCreateForm): boolean => !newTaskData.model && !newTaskData.reasoningEffort,
+        ],
+    }),
+
     listeners(({ actions, values, cache, props }) => ({
         // Release the manually-mounted optimistic stream once the create resolves (navigated to the real run)
         // or fails (returned to the composer), so the throwaway draft instance never leaks.
@@ -495,7 +535,7 @@ export const taskTrackerSceneLogic = kea<taskTrackerSceneLogicType>([
                 return
             }
 
-            const { description, repositoryConfig, model, reasoningEffort, permissionMode } = values.newTaskData
+            const { description, repositoryConfig, permissionMode } = values.newTaskData
 
             if (!description.trim()) {
                 lemonToast.error('Description is required')
@@ -536,29 +576,35 @@ export const taskTrackerSceneLogic = kea<taskTrackerSceneLogicType>([
                 const newTask = await tasksCreate(projectId, taskData)
 
                 // Auto-run the task after creation; the detail scene shows the latest run by default. The
-                // run checks out the chosen branch (server falls back to the repo's default branch if unset)
-                // and launches with the picked model / reasoning effort (clamped to one the model supports).
+                // run checks out the chosen branch (server falls back to the repo's default branch if unset).
+                const runPayload = {
+                    branch: repositoryConfig.branch ?? null,
+                    // Interactive keeps the sandbox agent-server's event stream open across turns, so
+                    // follow-up messages stream their reply over the same SSE (background runs seal the
+                    // stream after the first turn). Interactive runs boot with the agent-server pulling
+                    // pending_user_message from run state (the workflow doesn't forward it), so seed the
+                    // typed message as turn 1 — otherwise the first prompt is lost and the run idles.
+                    mode: TaskExecutionModeEnumApi.Interactive,
+                    // Wrap only the message sent to the agent with the on-screen context block; the task
+                    // `description` field and the optimistic seed (`startOptimisticRun`) stay raw.
+                    pending_user_message: wrapWithPosthogContext(description, seededContext),
+                }
+
+                // The model triple is omitted only when nothing is pinned AND a server default exists, so
+                // the backend resolves it (which also lets a warm run provisioned under that default
+                // match). Otherwise send the displayed selection, with the runtime derived from the model.
                 const runResponse = await tasksRunCreate(
                     projectId,
                     newTask.id,
-                    buildRunCreateRequest(
-                        values.catalogue,
-                        model,
-                        resolveEffortForModel(values.catalogue, reasoningEffort, model),
-                        permissionMode,
-                        {
-                            branch: repositoryConfig.branch ?? null,
-                            // Interactive keeps the sandbox agent-server's event stream open across turns, so
-                            // follow-up messages stream their reply over the same SSE (background runs seal the
-                            // stream after the first turn). Interactive runs boot with the agent-server pulling
-                            // pending_user_message from run state (the workflow doesn't forward it), so seed the
-                            // typed message as turn 1 — otherwise the first prompt is lost and the run idles.
-                            mode: TaskExecutionModeEnumApi.Interactive,
-                            // Wrap only the message sent to the agent with the on-screen context block; the task
-                            // `description` field and the optimistic seed (`startOptimisticRun`) stay raw.
-                            pending_user_message: wrapWithPosthogContext(description, seededContext),
-                        }
-                    )
+                    values.isDefaultSelection && values.claudeDefaultModel
+                        ? { ...runPayload, initial_permission_mode: permissionMode }
+                        : buildRunCreateRequest(
+                              values.catalogue,
+                              values.displayModel,
+                              values.displayEffort,
+                              permissionMode,
+                              runPayload
+                          )
                 )
 
                 // Mark the seeded non-text refs sent under the created task, so the run's first follow-up

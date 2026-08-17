@@ -30,11 +30,20 @@ import { RepositorySelector } from './RepositorySelector'
 export function TaskComposer(): JSX.Element {
     const { submitNewTask, setNewTaskData, setActiveSuggestionGroup, applySuggestion, clearConsentBlock } =
         useActions(taskTrackerSceneLogic)
-    const { newTaskData, isSubmittingTask, activeSuggestionGroup, displayHeadline, consentBlocked } =
-        useValues(taskTrackerSceneLogic)
+    const {
+        newTaskData,
+        isSubmittingTask,
+        activeSuggestionGroup,
+        displayHeadline,
+        consentBlocked,
+        displayModel,
+        displayEffort,
+        isDefaultSelection,
+    } = useValues(taskTrackerSceneLogic)
     const { catalogue } = useValues(modelCatalogueLogic)
-    // Permission modes belong to the harness, so they follow the picked model.
-    const composerAdapter = getRuntimeAdapterForModel(catalogue, newTaskData.model)
+    // Permission modes belong to the harness, so they follow the model actually shown — which with no
+    // explicit pick is the resolved default, not the empty selection.
+    const composerAdapter = getRuntimeAdapterForModel(catalogue, displayModel)
 
     // Buffer the description locally and debounce the write to kea so each keystroke is a cheap, isolated
     // re-render instead of a store dispatch. `Composer.Root` already blocks send on an empty `draft.value`
@@ -97,8 +106,9 @@ export function TaskComposer(): JSX.Element {
                                     />
                                     <ComposerModelEffortPickers
                                         models={catalogue}
-                                        selectedModel={newTaskData.model}
-                                        selectedEffort={newTaskData.reasoningEffort}
+                                        selectedModel={displayModel}
+                                        selectedEffort={displayEffort}
+                                        isDefaultSelection={isDefaultSelection}
                                         onModelChange={(model) =>
                                             setNewTaskData({
                                                 model,
@@ -117,6 +127,9 @@ export function TaskComposer(): JSX.Element {
                                             })
                                         }
                                         onEffortChange={(reasoningEffort) => setNewTaskData({ reasoningEffort })}
+                                        // Clearing both pins is what hands the choice back to the resolved
+                                        // default — submit then omits the triple entirely.
+                                        onResetToDefault={() => setNewTaskData({ model: null, reasoningEffort: null })}
                                     />
                                 </Composer.Footer>
                             </Composer.Frame>
