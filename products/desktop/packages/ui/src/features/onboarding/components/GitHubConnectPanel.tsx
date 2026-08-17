@@ -141,10 +141,12 @@ export function GitHubConnectPanel() {
       timedOut,
       errorCode: connectError?.code,
     };
-    const fingerprint = buildConnectFailureFingerprint(failureInputs);
-    if (!connectService.shouldReportFailure(fingerprint)) return;
+    // Any terminal outcome ends the in-flight attempt, even one the dedupe below
+    // decides not to report again.
     const flowType = inFlightConnectRef.current?.flowType ?? "user_new";
     inFlightConnectRef.current = null;
+    const fingerprint = buildConnectFailureFingerprint(failureInputs);
+    if (!connectService.shouldReportFailure(fingerprint)) return;
     if (isPendingApproval) {
       if (useSettingsStore.getState().githubConnectPendingSince === null) {
         useSettingsStore.getState().setGithubConnectPendingSince(Date.now());

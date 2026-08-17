@@ -24,7 +24,7 @@ describe("describeGithubConnectError", () => {
 
 describe("isGithubConnectPendingApproval", () => {
   it.each([
-    ["installation_pending_approval", true],
+    ["github_install_pending", true],
     ["access_denied", false],
     [null, false],
     [undefined, false],

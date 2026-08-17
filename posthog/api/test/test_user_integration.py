@@ -684,7 +684,7 @@ class TestUserIntegrationEndpoints(APIBaseTest):
         self.assertEqual(response.status_code, 302)
         loc = response["Location"]
         self.assertIn("provider=github", loc)
-        self.assertIn("error=installation_pending_approval", loc)
+        self.assertIn("error=github_install_pending", loc)
 
     @override_settings(GITHUB_APP_CLIENT_ID="client_id", SITE_URL="https://us.posthog.com")
     def test_github_link_personal_install_without_code_recovers_via_oauth_discover(self):
