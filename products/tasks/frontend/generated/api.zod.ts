@@ -1059,8 +1059,9 @@ export const TaskChannelsFeedCreateBody = /* @__PURE__ */ zod
 
 /**
  * API for task channels — the shared feeds tasks are kicked off in. Listing lazily
- * provisions the requester's personal "#me" channel; creation is resolve-or-create
- * by normalized name so clients can map channel-like surfaces onto backend channels.
+ * provisions the requester's personal "#me" channel and the team's shared "#general"
+ * channel (starred by default, like Slack); creation is resolve-or-create by
+ * normalized name so clients can map channel-like surfaces onto backend channels.
  * @summary Rename a public channel
  */
 export const taskChannelsPartialUpdateBodyNameMax = 128
@@ -1088,8 +1089,9 @@ export const TaskChannelsPartialUpdateBody = /* @__PURE__ */ zod.object({
 
 /**
  * API for task channels — the shared feeds tasks are kicked off in. Listing lazily
- * provisions the requester's personal "#me" channel; creation is resolve-or-create
- * by normalized name so clients can map channel-like surfaces onto backend channels.
+ * provisions the requester's personal "#me" channel and the team's shared "#general"
+ * channel (starred by default, like Slack); creation is resolve-or-create by
+ * normalized name so clients can map channel-like surfaces onto backend channels.
  * @summary Set or clear the channel's CONTEXT.md generation task
  */
 export const TaskChannelsContextGenerationUpdateBody = /* @__PURE__ */ zod
@@ -1149,8 +1151,9 @@ export const TaskChannelsInstructionsPartialUpdateBody = /* @__PURE__ */ zod
 
 /**
  * API for task channels — the shared feeds tasks are kicked off in. Listing lazily
- * provisions the requester's personal "#me" channel; creation is resolve-or-create
- * by normalized name so clients can map channel-like surfaces onto backend channels.
+ * provisions the requester's personal "#me" channel and the team's shared "#general"
+ * channel (starred by default, like Slack); creation is resolve-or-create by
+ * normalized name so clients can map channel-like surfaces onto backend channels.
  * @summary Star or unstar a channel for the requesting user
  */
 export const TaskChannelsStarCreateBody = /* @__PURE__ */ zod
