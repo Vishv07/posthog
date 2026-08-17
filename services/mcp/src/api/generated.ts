@@ -90511,6 +90511,16 @@ export namespace Schemas {
      */
     channel?: string;
     /**
+     * Filter tasks by the CI check rollup on their most recent run's pull request, as last observed from GitHub. 'none' means the PR has no checks.
+     *
+     * * `passing` - passing
+     * * `failing` - failing
+     * * `pending` - pending
+     * * `none` - none
+     * @minLength 1
+     */
+    ci_status?: TasksListCiStatus;
+    /**
      * Filter by creator user ID
      */
     created_by?: number;
@@ -90544,6 +90554,16 @@ export namespace Schemas {
      * @minLength 1
      */
     origin_product?: string;
+    /**
+     * Filter tasks by the state of their most recent run's pull request, as last observed from GitHub (webhooks plus the CI follow-up snapshot).
+     *
+     * * `open` - open
+     * * `draft` - draft
+     * * `merged` - merged
+     * * `closed` - closed
+     * @minLength 1
+     */
+    pr_state?: TasksListPrState;
     /**
      * Filter by repository name (can include org/repo format)
      * @minLength 1
@@ -90581,6 +90601,16 @@ export namespace Schemas {
       All: 'all',
     } as const;
 
+    export type TasksListCiStatus = typeof TasksListCiStatus[keyof typeof TasksListCiStatus];
+
+
+    export const TasksListCiStatus = {
+      Passing: 'passing',
+      Failing: 'failing',
+      Pending: 'pending',
+      None: 'none',
+    } as const;
+
     export type TasksListInternal = typeof TasksListInternal[keyof typeof TasksListInternal];
 
 
@@ -90588,6 +90618,16 @@ export namespace Schemas {
       True: 'true',
       False: 'false',
       All: 'all',
+    } as const;
+
+    export type TasksListPrState = typeof TasksListPrState[keyof typeof TasksListPrState];
+
+
+    export const TasksListPrState = {
+      Open: 'open',
+      Draft: 'draft',
+      Merged: 'merged',
+      Closed: 'closed',
     } as const;
 
     export type TasksListStatus = typeof TasksListStatus[keyof typeof TasksListStatus];
