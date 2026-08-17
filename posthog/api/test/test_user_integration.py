@@ -662,6 +662,30 @@ class TestUserIntegrationEndpoints(APIBaseTest):
         self.assertEqual(response.status_code, 302)
         self.assertIn("github_link_error=missing_params", response["Location"])
 
+    def test_github_link_personal_install_reports_pending_approval_when_org_owner_must_approve(self):
+        # GitHub sends the user back with `setup_action=request` and no `installation_id`/`code`
+        # when the account isn't an org owner, so it only requested approval instead of installing.
+        # That must surface as its own error code, not fall through to the generic missing_params.
+        state = "test_state_pending_approval"
+        store_unified_authorize_state(
+            GitHubAuthorizeState(
+                token=state,
+                flow=FlowKind.PERSONAL_INSTALL,
+                user_id=self.user.id,
+                connect_from="posthog_code",
+            ),
+        )
+
+        response = self.client.get(
+            "/complete/github-link/",
+            {"state": state, "setup_action": "request"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        loc = response["Location"]
+        self.assertIn("provider=github", loc)
+        self.assertIn("error=installation_pending_approval", loc)
+
     @override_settings(GITHUB_APP_CLIENT_ID="client_id", SITE_URL="https://us.posthog.com")
     def test_github_link_personal_install_without_code_recovers_via_oauth_discover(self):
         # GitHub omits the OAuth code when the App is already installed, returning a

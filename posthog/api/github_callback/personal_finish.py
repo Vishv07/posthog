@@ -76,6 +76,14 @@ def finish_personal(request: HttpRequest) -> FinishResult:
                 ),
             )
             return FinishResult(redirect_kind="oauth_url", oauth_url=github_oauth_authorize_url(discover_state))
+        if request.GET.get("setup_action") == "request":
+            # The account isn't an org owner, so GitHub showed "request approval from an
+            # owner" instead of completing the install. Not reporting a server-side event
+            # here: the personal authorize state doesn't carry a team_id (unlike the team
+            # flow's `_report_install_pending`), so there's no team we can safely attribute
+            # it to without guessing at `user.current_team`, which may not be the project
+            # the user was connecting from.
+            return _error("installation_pending_approval")
         return _error("missing_params")
 
     match flow:
