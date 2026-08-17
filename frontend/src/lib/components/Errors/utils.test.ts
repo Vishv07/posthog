@@ -1,7 +1,11 @@
 import { ErrorEventProperties, ExceptionAttributes } from './types'
-import { getExceptionAttributes, getExceptionList, getExceptionRelease, getSessionId } from './utils'
+import { getExceptionAttributes, getExceptionList, getExceptionRelease, getRuntimeFromLib, getSessionId } from './utils'
 
 describe('Error Display', () => {
+    it('recognizes the Kotlin Multiplatform SDK runtime', () => {
+        expect(getRuntimeFromLib('posthog-kmp')).toBe('kotlin')
+    })
+
     it('can read sentry stack trace when $exception_list is not present', () => {
         const eventProperties = {
             'should not be in the': 'result',
