@@ -73,6 +73,10 @@ class CanReadBillingUsageAndSpend(permissions.BasePermission):
     `member-billing-usage-spend-read-access` flag lowers the bar to plain members. Flag evaluation
     fails closed, and the precedence mirrors `getMinimumUsageSpendReadAccessLevel` in
     billing-utils.ts and `HasBillingDataAccess` in the billing service.
+
+    The frontend additionally requires `usage-spend-dashboards` before honoring the member grant,
+    because that flag decides whether the member-facing usage/spend UI exists at all. It is not an
+    authorization input, so neither this permission nor the billing service consults it.
     """
 
     message = "You do not have the permissions required to view billing usage and spend data."
