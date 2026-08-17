@@ -332,6 +332,7 @@ rules:
                               |TaskRun
                               |TaskSearchDocument
                               |TaskSession
+                              |UserTasksConfig
                               |TaskThreadMessage
                               |TaskThreadMessageMention
                               |Channel
@@ -691,6 +692,7 @@ rules:
                         |TaskPresence
                         |TaskRun
                         |TaskSession
+                        |UserTasksConfig
                         |TaskThreadMessage
                         |TaskThreadMessageMention
                         |Channel

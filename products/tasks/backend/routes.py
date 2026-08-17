@@ -3,11 +3,18 @@ from posthog.api.routing import RouterRegistry
 import products.tasks.backend.presentation.views.api as tasks
 import products.tasks.backend.presentation.views.loops as loops
 import products.tasks.backend.presentation.views.seat_api as seats
+import products.tasks.backend.presentation.views.config_api as config
 import products.tasks.backend.presentation.views.channels_api as channels
 import products.tasks.backend.presentation.views.sandbox_pricing_api as sandbox_pricing
 
 
 def register_routes(routers: RouterRegistry) -> None:
+    # Static `tasks/...` prefixes are registered before the `tasks` viewset so they can't be
+    # swallowed by its `tasks/{pk}` detail pattern.
+    routers.projects.register(r"tasks/config", config.TasksTeamConfigViewSet, "project_tasks_config", ["team_id"])
+    routers.projects.register(
+        r"tasks/@me/config", config.TasksUserConfigViewSet, "project_tasks_me_config", ["team_id"]
+    )
     project_tasks_router = routers.projects.register(r"tasks", tasks.TaskViewSet, "project_tasks", ["team_id"])
     project_task_runs_router = project_tasks_router.register(
         r"runs", tasks.TaskRunViewSet, "project_task_runs", ["team_id", "task_id"]
