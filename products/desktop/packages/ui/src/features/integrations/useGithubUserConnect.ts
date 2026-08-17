@@ -34,6 +34,7 @@ function celebrateApprovalIfPending(): void {
     githubConnectPendingSince,
     setGithubConnectPendingSince,
     setLastUsedRunMode,
+    setLastUsedWorkspaceMode,
   } = useSettingsStore.getState();
   const { shouldCelebrate, waitSeconds } = computeApprovedAfterPending(
     githubConnectPendingSince,
@@ -44,6 +45,10 @@ function celebrateApprovalIfPending(): void {
     wait_seconds: waitSeconds,
   });
   setGithubConnectPendingSince(null);
+  // The next task's cloud-vs-local default is driven by lastUsedWorkspaceMode,
+  // so set it to honor the toast; lastUsedRunMode is kept paired with it, the
+  // way task creation does.
+  setLastUsedWorkspaceMode("cloud");
   setLastUsedRunMode("cloud");
   toast.success(
     "GitHub is connected",
