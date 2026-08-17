@@ -33,6 +33,7 @@ import { Route as WebsiteChannelIdIndexRouteImport } from './routes/website/$cha
 import { Route as CodeLoopsIndexRouteImport } from './routes/code/loops/index'
 import { Route as CodeInboxIndexRouteImport } from './routes/code/inbox/index'
 import { Route as CodeAgentsIndexRouteImport } from './routes/code/agents/index'
+import { Route as WebsiteFeedsFeedIdRouteImport } from './routes/website/feeds/$feedId'
 import { Route as WebsiteChannelIdNewRouteImport } from './routes/website/$channelId/new'
 import { Route as WebsiteChannelIdLoopsRouteImport } from './routes/website/$channelId/loops'
 import { Route as WebsiteChannelIdHistoryRouteImport } from './routes/website/$channelId/history'
@@ -199,6 +200,11 @@ const CodeAgentsIndexRoute = CodeAgentsIndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => CodeAgentsRoute,
+} as any)
+const WebsiteFeedsFeedIdRoute = WebsiteFeedsFeedIdRouteImport.update({
+  id: '/feeds/$feedId',
+  path: '/feeds/$feedId',
+  getParentRoute: () => WebsiteRoute,
 } as any)
 const WebsiteChannelIdNewRoute = WebsiteChannelIdNewRouteImport.update({
   id: '/$channelId/new',
@@ -490,6 +496,7 @@ export interface FileRoutesByFullPath {
   '/website/$channelId/history': typeof WebsiteChannelIdHistoryRoute
   '/website/$channelId/loops': typeof WebsiteChannelIdLoopsRoute
   '/website/$channelId/new': typeof WebsiteChannelIdNewRoute
+  '/website/feeds/$feedId': typeof WebsiteFeedsFeedIdRoute
   '/code/agents/': typeof CodeAgentsIndexRoute
   '/code/inbox/': typeof CodeInboxIndexRoute
   '/code/loops/': typeof CodeLoopsIndexRoute
@@ -552,6 +559,7 @@ export interface FileRoutesByTo {
   '/website/$channelId/history': typeof WebsiteChannelIdHistoryRoute
   '/website/$channelId/loops': typeof WebsiteChannelIdLoopsRoute
   '/website/$channelId/new': typeof WebsiteChannelIdNewRoute
+  '/website/feeds/$feedId': typeof WebsiteFeedsFeedIdRoute
   '/code/agents': typeof CodeAgentsIndexRoute
   '/code/inbox': typeof CodeInboxIndexRoute
   '/code/loops': typeof CodeLoopsIndexRoute
@@ -623,6 +631,7 @@ export interface FileRoutesById {
   '/website/$channelId/history': typeof WebsiteChannelIdHistoryRoute
   '/website/$channelId/loops': typeof WebsiteChannelIdLoopsRoute
   '/website/$channelId/new': typeof WebsiteChannelIdNewRoute
+  '/website/feeds/$feedId': typeof WebsiteFeedsFeedIdRoute
   '/code/agents/': typeof CodeAgentsIndexRoute
   '/code/inbox/': typeof CodeInboxIndexRoute
   '/code/loops/': typeof CodeLoopsIndexRoute
@@ -697,6 +706,7 @@ export interface FileRouteTypes {
     | '/website/$channelId/history'
     | '/website/$channelId/loops'
     | '/website/$channelId/new'
+    | '/website/feeds/$feedId'
     | '/code/agents/'
     | '/code/inbox/'
     | '/code/loops/'
@@ -759,6 +769,7 @@ export interface FileRouteTypes {
     | '/website/$channelId/history'
     | '/website/$channelId/loops'
     | '/website/$channelId/new'
+    | '/website/feeds/$feedId'
     | '/code/agents'
     | '/code/inbox'
     | '/code/loops'
@@ -829,6 +840,7 @@ export interface FileRouteTypes {
     | '/website/$channelId/history'
     | '/website/$channelId/loops'
     | '/website/$channelId/new'
+    | '/website/feeds/$feedId'
     | '/code/agents/'
     | '/code/inbox/'
     | '/code/loops/'
@@ -1056,6 +1068,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/code/agents/'
       preLoaderRoute: typeof CodeAgentsIndexRouteImport
       parentRoute: typeof CodeAgentsRoute
+    }
+    '/website/feeds/$feedId': {
+      id: '/website/feeds/$feedId'
+      path: '/feeds/$feedId'
+      fullPath: '/website/feeds/$feedId'
+      preLoaderRoute: typeof WebsiteFeedsFeedIdRouteImport
+      parentRoute: typeof WebsiteRoute
     }
     '/website/$channelId/new': {
       id: '/website/$channelId/new'
@@ -1395,6 +1414,7 @@ interface WebsiteRouteChildren {
   WebsiteChannelIdHistoryRoute: typeof WebsiteChannelIdHistoryRoute
   WebsiteChannelIdLoopsRoute: typeof WebsiteChannelIdLoopsRoute
   WebsiteChannelIdNewRoute: typeof WebsiteChannelIdNewRoute
+  WebsiteFeedsFeedIdRoute: typeof WebsiteFeedsFeedIdRoute
   WebsiteChannelIdIndexRoute: typeof WebsiteChannelIdIndexRoute
   WebsiteChannelIdDashboardsDashboardIdRoute: typeof WebsiteChannelIdDashboardsDashboardIdRoute
   WebsiteChannelIdTasksTaskIdRoute: typeof WebsiteChannelIdTasksTaskIdRoute
@@ -1413,6 +1433,7 @@ const WebsiteRouteChildren: WebsiteRouteChildren = {
   WebsiteChannelIdHistoryRoute: WebsiteChannelIdHistoryRoute,
   WebsiteChannelIdLoopsRoute: WebsiteChannelIdLoopsRoute,
   WebsiteChannelIdNewRoute: WebsiteChannelIdNewRoute,
+  WebsiteFeedsFeedIdRoute: WebsiteFeedsFeedIdRoute,
   WebsiteChannelIdIndexRoute: WebsiteChannelIdIndexRoute,
   WebsiteChannelIdDashboardsDashboardIdRoute:
     WebsiteChannelIdDashboardsDashboardIdRoute,

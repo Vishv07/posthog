@@ -230,6 +230,8 @@ export interface TaskListOptions {
   originProduct?: string;
   internal?: boolean;
   channel?: string;
+  /** Case-insensitive substring match over task title, description, and number. */
+  search?: string;
   /** Caller-side cap for surfaces that only show the newest few. */
   limit?: number;
 }
@@ -2336,6 +2338,10 @@ export class PostHogAPIClient {
 
     if (options?.channel) {
       params.channel = options.channel;
+    }
+
+    if (options?.search) {
+      params.search = options.search;
     }
 
     const data = await this.api.get(`/api/projects/{project_id}/tasks/`, {
