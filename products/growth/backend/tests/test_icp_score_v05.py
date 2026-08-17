@@ -1,3 +1,5 @@
+from typing import Any
+
 from parameterized import parameterized
 
 from products.growth.backend.enrichment.score_v05 import (
@@ -23,7 +25,7 @@ LISTS = CuratedLists(
 
 def _payload(**overrides):
     """A matched company that scores 0 with full data coverage absent; cases override one branch."""
-    payload = {
+    payload: dict[str, Any] = {
         "company_type": "STARTUP",
         "headcount": None,
         "description": None,

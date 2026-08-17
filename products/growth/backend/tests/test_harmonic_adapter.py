@@ -3,6 +3,13 @@ from parameterized import parameterized
 from products.growth.backend.enrichment.harmonic_adapter import normalize_graphql_company
 from products.growth.backend.enrichment.score_v05 import CuratedLists, score_company
 
+
+def _normalized(company):
+    result = normalize_graphql_company(company)
+    assert result is not None
+    return result
+
+
 LISTS = CuratedLists(version="test-lists")
 
 
@@ -74,7 +81,7 @@ def test_growth_derived_as_of_the_latest_observation():
             }
         }
     }
-    block = normalize_graphql_company(company)["traction_metrics"]["web_traffic"]
+    block = _normalized(company)["traction_metrics"]["web_traffic"]
     assert block["90d_ago"] == {"percent_change": 50.0, "change": 4_000}
 
 
@@ -91,7 +98,7 @@ def test_headcount_growth_uses_the_180d_window_and_absolute_change():
             }
         }
     }
-    block = normalize_graphql_company(company)["traction_metrics"]["headcount"]
+    block = _normalized(company)["traction_metrics"]["headcount"]
     assert block["180d_ago"] == {"percent_change": 15.0, "change": 3}
 
 
@@ -113,7 +120,7 @@ def test_headcount_growth_uses_the_180d_window_and_absolute_change():
 )
 def test_uncoverable_windows_yield_unknown_growth_never_zero(_name, metrics):
     company = {"tractionMetrics": {"webTraffic": {"latestMetricValue": 9_000, "metrics": metrics}}}
-    block = normalize_graphql_company(company)["traction_metrics"]["web_traffic"]
+    block = _normalized(company)["traction_metrics"]["web_traffic"]
     assert block["90d_ago"] == {"percent_change": None, "change": None}
 
 
@@ -130,7 +137,7 @@ def test_unsorted_series_are_sorted_before_derivation():
             }
         }
     }
-    block = normalize_graphql_company(company)["traction_metrics"]["web_traffic"]
+    block = _normalized(company)["traction_metrics"]["web_traffic"]
     assert block["90d_ago"]["percent_change"] == 50.0  # 4000 (Feb 25, last <= Mar 3 anchor) -> 6000
 
 

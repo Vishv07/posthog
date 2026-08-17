@@ -62,13 +62,19 @@ class TestIcpLists(BaseTest):
 
     def test_load_active_lists_caches_until_cleared(self):
         config = _config(is_active=True)
-        assert load_active_lists().version == "lists-1"
+
+        def active_version() -> str:
+            lists = load_active_lists()
+            assert lists is not None
+            return lists.version
+
+        assert active_version() == "lists-1"
 
         config.version = "lists-2"
         config.save()
-        assert load_active_lists().version == "lists-1"  # cached
+        assert active_version() == "lists-1"  # cached
         clear_lists_cache()
-        assert load_active_lists().version == "lists-2"
+        assert active_version() == "lists-2"
 
     def test_ai_grant_rows_are_upgraded_to_both_buckets_at_import(self):
         rows = parse_tags_csv_rows(

@@ -17,7 +17,7 @@ SNAPSHOT_EVENT_NAME = "enrichment_snapshot_at_signup"
 SNAPSHOT_PROPERTY_SUFFIX = "_at_signup"
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(frozen=True)
 class SignupEnrichmentSnapshot:
     """PII-light firmographic values captured at signup.
 
