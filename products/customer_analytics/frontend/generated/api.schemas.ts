@@ -1566,6 +1566,83 @@ export interface FeatureRequestAccountApi {
     readonly name: string
 }
 
+/**
+ * * `conversation` - Customer conversation
+ * * `slack` - Slack
+ * * `zendesk` - Zendesk
+ * * `email` - Email
+ * * `meeting` - Meeting
+ * * `buildbetter` - BuildBetter
+ * * `other` - Other
+ */
+export type EvidenceSourceEnumApi = (typeof EvidenceSourceEnumApi)[keyof typeof EvidenceSourceEnumApi]
+
+export const EvidenceSourceEnumApi = {
+    Conversation: 'conversation',
+    Slack: 'slack',
+    Zendesk: 'zendesk',
+    Email: 'email',
+    Meeting: 'meeting',
+    Buildbetter: 'buildbetter',
+    Other: 'other',
+} as const
+
+export interface FeatureRequestEvidenceApi {
+    /** Stable evidence ID. */
+    readonly id: string
+    /** Internal summary of this account's request evidence. */
+    readonly summary: string
+    /** Customer quote kept with this evidence item. */
+    readonly customer_quote: string
+    /** Channel where this evidence was recorded.
+     *
+     * * `conversation` - Customer conversation
+     * * `slack` - Slack
+     * * `zendesk` - Zendesk
+     * * `email` - Email
+     * * `meeting` - Meeting
+     * * `buildbetter` - BuildBetter
+     * * `other` - Other */
+    readonly evidence_source: EvidenceSourceEnumApi
+    /** HTTP or HTTPS link to the source, or an empty string. */
+    readonly source_url: string
+    /**
+     * Date the account made the request, or null when unknown.
+     * @nullable
+     */
+    readonly requested_on: string | null
+    /**
+     * ID of the user who added the evidence.
+     * @nullable
+     */
+    readonly created_by: number | null
+    /**
+     * ID of the last user to update the evidence.
+     * @nullable
+     */
+    readonly updated_by: number | null
+    /** When the evidence was added. */
+    readonly created_at: string
+    /** When the evidence was last updated. */
+    readonly updated_at: string
+}
+
+export interface FeatureRequestAccountLinkApi {
+    /** Stable link ID between the request and account. */
+    readonly id: string
+    /** Affected Customer Analytics account. */
+    readonly account: FeatureRequestAccountApi
+    /** Evidence recorded for this account and request. */
+    readonly evidence: readonly FeatureRequestEvidenceApi[]
+    /** When the account was first linked. */
+    readonly created_at: string
+    /**
+     * When the account link was last changed.
+     * @nullable
+     */
+    readonly updated_at: string | null
+}
+
 export interface FeatureRequestApi {
     /** Stable feature request ID. */
     readonly id: string
@@ -1604,8 +1681,10 @@ export interface FeatureRequestApi {
      * @minimum 1
      */
     readonly version: number
-    /** Affected account in the first release. */
+    /** First visible account retained for client compatibility. Use account_links for the complete list. */
     readonly account: FeatureRequestAccountApi
+    /** Active account links visible to the caller, with account-specific evidence. */
+    readonly account_links: readonly FeatureRequestAccountLinkApi[]
     /** Product areas affected by this request. */
     readonly product_areas: readonly FeatureRequestProductAreaApi[]
     /**
@@ -1662,8 +1741,10 @@ export interface FeatureRequestUpdateApi {
     title?: string
     /** Updated optional customer-facing request description in Markdown. */
     description?: string
-    /** Updated affected Customer Analytics account ID. */
+    /** Deprecated single affected account ID. Use account_ids. */
     account_id?: string
+    /** One or more affected account IDs. Removed accounts are unlinked without deleting their evidence. */
+    account_ids?: string[]
     /** One or more product area IDs. Existing inactive areas can remain linked. */
     product_area_ids?: string[]
     /** Updated customer-facing lifecycle status.
@@ -1695,8 +1776,10 @@ export interface PatchedFeatureRequestUpdateApi {
     title?: string
     /** Updated optional customer-facing request description in Markdown. */
     description?: string
-    /** Updated affected Customer Analytics account ID. */
+    /** Deprecated single affected account ID. Use account_ids. */
     account_id?: string
+    /** One or more affected account IDs. Removed accounts are unlinked without deleting their evidence. */
+    account_ids?: string[]
     /** One or more product area IDs. Existing inactive areas can remain linked. */
     product_area_ids?: string[]
     /** Updated customer-facing lifecycle status.
@@ -1715,6 +1798,40 @@ export interface PatchedFeatureRequestUpdateApi {
     request_priority?: RequestPriorityEnumApi | null
 }
 
+export interface FeatureRequestEvidenceCreateApi {
+    /**
+     * Request version loaded by the editor. Stale versions return 409 Conflict.
+     * @minimum 1
+     */
+    expected_version: number
+    /** Internal summary of this account's request evidence. */
+    summary?: string
+    /** Customer quote kept with this evidence item. */
+    customer_quote?: string
+    /** Channel where this evidence was recorded.
+     *
+     * * `conversation` - Customer conversation
+     * * `slack` - Slack
+     * * `zendesk` - Zendesk
+     * * `email` - Email
+     * * `meeting` - Meeting
+     * * `buildbetter` - BuildBetter
+     * * `other` - Other */
+    evidence_source: EvidenceSourceEnumApi
+    /**
+     * Optional HTTP or HTTPS link to the source.
+     * @maxLength 2000
+     */
+    source_url?: string
+    /**
+     * Date the account made the request, or null when unknown.
+     * @nullable
+     */
+    requested_on?: string | null
+    /** Active account link that owns this evidence. */
+    account_link_id: string
+}
+
 export interface FeatureRequestVersionApi {
     /**
      * Request version loaded by the editor. Stale versions return 409 Conflict.
@@ -1727,6 +1844,8 @@ export interface FeatureRequestVersionApi {
  * * `status` - Status
  * * `priority` - Priority
  * * `account` - Account
+ * * `accounts` - Accounts
+ * * `evidence` - Evidence
  * * `product_areas` - Product areas
  */
 export type FieldEnumApi = (typeof FieldEnumApi)[keyof typeof FieldEnumApi]
@@ -1735,6 +1854,8 @@ export const FieldEnumApi = {
     Status: 'status',
     Priority: 'priority',
     Account: 'account',
+    Accounts: 'accounts',
+    Evidence: 'evidence',
     ProductAreas: 'product_areas',
 } as const
 
@@ -1752,6 +1873,19 @@ export type FeatureRequestHistoryChangeApiBefore =
           id: string
           name: string
       }[]
+    | {
+          id: string
+          account: {
+              id: string
+              name: string
+          }
+          summary: string
+          customer_quote: string
+          source: string
+          source_url: string
+          /** @nullable */
+          requested_on: string | null
+      }
     | null
 
 /**
@@ -1768,6 +1902,19 @@ export type FeatureRequestHistoryChangeApiAfter =
           id: string
           name: string
       }[]
+    | {
+          id: string
+          account: {
+              id: string
+              name: string
+          }
+          summary: string
+          customer_quote: string
+          source: string
+          source_url: string
+          /** @nullable */
+          requested_on: string | null
+      }
     | null
 
 export interface FeatureRequestHistoryChangeApi {
@@ -1776,6 +1923,8 @@ export interface FeatureRequestHistoryChangeApi {
      * * `status` - Status
      * * `priority` - Priority
      * * `account` - Account
+     * * `accounts` - Accounts
+     * * `evidence` - Evidence
      * * `product_areas` - Product areas */
     readonly field: FieldEnumApi
     /** Value before the update, including relation snapshots. */
@@ -1818,6 +1967,16 @@ export interface FeatureRequestHistoryApi {
     readonly changed_at: string
 }
 
+export interface FeatureRequestEvidenceDeleteApi {
+    /**
+     * Request version loaded by the editor. Stale versions return 409 Conflict.
+     * @minimum 1
+     */
+    expected_version: number
+    /** Evidence item to delete. */
+    evidence_id: string
+}
+
 export interface FeatureRequestStatusHistoryApi {
     /** Stable status history entry ID. */
     readonly id: string
@@ -1853,6 +2012,40 @@ export interface FeatureRequestStatusHistoryApi {
     readonly actor_name: string | null
     /** When the status changed. */
     readonly changed_at: string
+}
+
+export interface FeatureRequestEvidenceUpdateApi {
+    /**
+     * Request version loaded by the editor. Stale versions return 409 Conflict.
+     * @minimum 1
+     */
+    expected_version: number
+    /** Internal summary of this account's request evidence. */
+    summary?: string
+    /** Customer quote kept with this evidence item. */
+    customer_quote?: string
+    /** Channel where this evidence was recorded.
+     *
+     * * `conversation` - Customer conversation
+     * * `slack` - Slack
+     * * `zendesk` - Zendesk
+     * * `email` - Email
+     * * `meeting` - Meeting
+     * * `buildbetter` - BuildBetter
+     * * `other` - Other */
+    evidence_source: EvidenceSourceEnumApi
+    /**
+     * Optional HTTP or HTTPS link to the source.
+     * @maxLength 2000
+     */
+    source_url?: string
+    /**
+     * Date the account made the request, or null when unknown.
+     * @nullable
+     */
+    requested_on?: string | null
+    /** Evidence item to replace. */
+    evidence_id: string
 }
 
 /**
