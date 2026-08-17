@@ -90521,6 +90521,10 @@ export namespace Schemas {
      */
     ci_status?: TasksListCiStatus;
     /**
+     * Filter to tasks carrying a thread comment written by this user ID.
+     */
+    commented_by?: number;
+    /**
      * Filter by creator user ID
      */
     created_by?: number;
@@ -90540,6 +90544,10 @@ export namespace Schemas {
      */
     limit?: number;
     /**
+     * Filter to tasks whose thread mentions this user ID.
+     */
+    mentions?: number;
+    /**
      * The initial index from which to return the results.
      * @minimum 0
      */
@@ -90554,6 +90562,10 @@ export namespace Schemas {
      * @minLength 1
      */
     origin_product?: string;
+    /**
+     * With true, only tasks the requesting user has pinned.
+     */
+    pinned?: boolean;
     /**
      * Filter tasks by the state of their most recent run's pull request, as last observed from GitHub (webhooks plus the CI follow-up snapshot).
      *
