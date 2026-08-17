@@ -58,13 +58,13 @@ SELECT_ACTIVITY_TIMEOUT = dt.timedelta(minutes=5)
 _SIGNUP_MEMBERSHIP_WINDOW = dt.timedelta(minutes=5)
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(frozen=True)
 class IcpReenrichmentSweepInputs:
     # Overrides the GROWTH_ICP_REENRICH_DAILY_CAP setting when set (manual triggers).
     cap: typing.Optional[int] = None
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(frozen=True)
 class ReenrichOrgInputs:
     organization_id: str
     distinct_id: str
