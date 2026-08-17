@@ -35,6 +35,7 @@ class SignupEnrichmentSnapshot:
     is_yc_company: Optional[bool] = None
     icp_score: Optional[int] = None
     icp_score_version: Optional[str] = None
+    icp_score_status: Optional[str] = None
 
     def to_event_properties(self) -> dict[str, Any]:
         """Return the snapshot as `*_at_signup` event properties, dropping unset values."""

@@ -12,6 +12,14 @@ from products.growth.backend.models import EnrichmentSignupSnapshot
 
 
 class TestSignupEnrichmentSnapshot(BaseTest):
+    def test_icp_score_status_rides_along_without_a_numeric_score(self) -> None:
+        # An insufficient_data evaluation at signup snapshots the status alone, keeping
+        # "insufficient at signup" distinguishable from "never evaluated" forever.
+        snapshot = SignupEnrichmentSnapshot(company_type="startup", icp_score_status="insufficient_data")
+        properties = snapshot.to_event_properties()
+        assert properties["icp_score_status_at_signup"] == "insufficient_data"
+        assert "icp_score_at_signup" not in properties
+
     def test_to_event_properties_suffixes_keys_and_drops_none(self) -> None:
         snapshot = SignupEnrichmentSnapshot(
             company_type="startup",
