@@ -27,6 +27,7 @@ import { CloudArtifactDownloads } from "@posthog/ui/features/sessions/components
 import {
   CloudStreamDisconnectedBanner,
   ConnectingToAgent,
+  SandboxUnavailableBanner,
 } from "@posthog/ui/features/sessions/components/CloudSessionLifecycle";
 import { ContextUsageIndicator } from "@posthog/ui/features/sessions/components/ContextUsageIndicator";
 import type { PromptRecallHandler } from "@posthog/ui/features/sessions/components/chat-thread/composerPromptRecall";
@@ -114,6 +115,8 @@ interface SessionViewProps {
   isInitializing?: boolean;
   isCloud?: boolean;
   cloudStatus?: TaskRunStatus | null;
+  /** Non-terminal cloud run whose sandbox the server reports as gone. */
+  sandboxUnavailable?: boolean;
   slackThreadUrl?: string;
   compact?: boolean;
   isActiveSession?: boolean;
@@ -228,6 +231,7 @@ export function SessionView({
   isInitializing = false,
   isCloud = false,
   cloudStatus = null,
+  sandboxUnavailable = false,
   slackThreadUrl,
   compact = false,
   isActiveSession = true,
@@ -713,6 +717,9 @@ export function SessionView({
                     errorMessage={errorMessage}
                     onRetry={onRetry}
                   />
+                )}
+                {!showInlineBanner && sandboxUnavailable && (
+                  <SandboxUnavailableBanner onRetry={onRetry} />
                 )}
                 <ThreadView
                   events={events}
