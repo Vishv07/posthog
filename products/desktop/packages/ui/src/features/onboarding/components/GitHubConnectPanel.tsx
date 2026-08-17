@@ -6,7 +6,9 @@ import {
   GithubLogo,
   Plus,
 } from "@phosphor-icons/react";
+import { isGithubConnectPendingApproval } from "@posthog/core/integrations/connectErrors";
 import {
+  buildConnectAbandonedProps,
   buildConnectFailedProps,
   buildConnectFailureFingerprint,
   buildInstallationSettingsUrl,
@@ -35,6 +37,7 @@ import { OptionalBadge } from "@posthog/ui/features/onboarding/components/Option
 import { PANEL_SHADOW } from "@posthog/ui/features/onboarding/components/onboardingStyles";
 import { useProjectsWithIntegrations } from "@posthog/ui/features/onboarding/hooks/useProjectsWithIntegrations";
 import { useOnboardingStore } from "@posthog/ui/features/onboarding/onboardingStore";
+import { useSettingsStore } from "@posthog/ui/features/settings/settingsStore";
 import { track } from "@posthog/ui/shell/analytics";
 import { openExternalUrl } from "@posthog/ui/shell/openExternal";
 import {
@@ -48,7 +51,7 @@ import {
   Text,
 } from "@radix-ui/themes";
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 export function GitHubConnectPanel() {
   const queryClient = useQueryClient();
@@ -75,6 +78,15 @@ export function GitHubConnectPanel() {
     [projects, selectedProjectId],
   );
 
+  // Tracks a connect attempt from "started" through to whichever terminal
+  // outcome lands (connected / failed / pending / timed out), so an unmount in
+  // between — the user closing the panel or navigating away mid-flow — can be
+  // reported as an abandoned connect instead of silently disappearing.
+  const inFlightConnectRef = useRef<{
+    flowType: OnboardingGithubConnectFlow;
+    startedAtMs: number;
+  } | null>(null);
+
   const {
     error: connectError,
     isConnecting,
@@ -85,9 +97,13 @@ export function GitHubConnectPanel() {
   } = useGithubConnect({
     projectId: selectedProjectId,
     projectHasTeamIntegration: selectedProject?.hasGithubIntegration ?? null,
-    onConnected: () => track(ANALYTICS_EVENTS.ONBOARDING_GITHUB_CONNECTED),
+    onConnected: () => {
+      inFlightConnectRef.current = null;
+      track(ANALYTICS_EVENTS.ONBOARDING_GITHUB_CONNECTED);
+    },
   });
   const canTakeAction = !isConnecting && !timedOut && !hasConnectError;
+  const isPendingApproval = isGithubConnectPendingApproval(connectError?.code);
 
   const initiateConnect = (
     flowType: OnboardingGithubConnectFlow,
@@ -97,8 +113,24 @@ export function GitHubConnectPanel() {
       flow_type: flowType,
       is_retry: isRetry,
     });
+    inFlightConnectRef.current = { flowType, startedAtMs: Date.now() };
     void handleConnectGitHub();
   };
+
+  useEffect(() => {
+    return () => {
+      const inFlight = inFlightConnectRef.current;
+      if (!inFlight) return;
+      track(
+        ANALYTICS_EVENTS.ONBOARDING_GITHUB_CONNECT_ABANDONED,
+        buildConnectAbandonedProps({
+          flowType: inFlight.flowType,
+          startedAtMs: inFlight.startedAtMs,
+          nowMs: Date.now(),
+        }),
+      );
+    };
+  }, []);
 
   const connectService = useService<GithubConnectService>(
     GITHUB_CONNECT_SERVICE,
@@ -111,11 +143,28 @@ export function GitHubConnectPanel() {
     };
     const fingerprint = buildConnectFailureFingerprint(failureInputs);
     if (!connectService.shouldReportFailure(fingerprint)) return;
+    const flowType = inFlightConnectRef.current?.flowType ?? "user_new";
+    inFlightConnectRef.current = null;
+    if (isPendingApproval) {
+      if (useSettingsStore.getState().githubConnectPendingSince === null) {
+        useSettingsStore.getState().setGithubConnectPendingSince(Date.now());
+      }
+      track(ANALYTICS_EVENTS.ONBOARDING_GITHUB_CONNECT_PENDING_ADMIN, {
+        flow_type: flowType,
+      });
+      return;
+    }
     track(
       ANALYTICS_EVENTS.ONBOARDING_GITHUB_CONNECT_FAILED,
       buildConnectFailedProps(failureInputs),
     );
-  }, [hasConnectError, timedOut, connectError, connectService]);
+  }, [
+    hasConnectError,
+    timedOut,
+    connectError,
+    connectService,
+    isPendingApproval,
+  ]);
 
   const defaultPanelMessage = getGithubPanelMessage({
     hasConnectError,
@@ -259,7 +308,7 @@ export function GitHubConnectPanel() {
               ) : (
                 <Text
                   className={
-                    hasConnectError
+                    hasConnectError && !isPendingApproval
                       ? "text-(--red-11) text-sm"
                       : "text-(--gray-11) text-sm"
                   }

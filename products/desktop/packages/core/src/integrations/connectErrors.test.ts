@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { describeGithubConnectError } from "./connectErrors";
+import {
+  describeGithubConnectError,
+  isGithubConnectPendingApproval,
+} from "./connectErrors";
 
 describe("describeGithubConnectError", () => {
   it("returns an empty string for no error", () => {
@@ -16,5 +19,16 @@ describe("describeGithubConnectError", () => {
     expect(
       describeGithubConnectError({ message: "raw message", code: "unknown" }),
     ).toBe("raw message");
+  });
+});
+
+describe("isGithubConnectPendingApproval", () => {
+  it.each([
+    ["installation_pending_approval", true],
+    ["access_denied", false],
+    [null, false],
+    [undefined, false],
+  ])("code %s -> %s", (code, expected) => {
+    expect(isGithubConnectPendingApproval(code)).toBe(expected);
   });
 });

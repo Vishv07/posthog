@@ -82,3 +82,25 @@ export function githubInvalidationKeys(
 export function slackInvalidationKeys(): ReadonlyArray<ReadonlyArray<unknown>> {
   return [["integrations", "list"], ["integrations"]];
 }
+
+export interface ApprovedAfterPendingOutcome {
+  shouldCelebrate: boolean;
+  waitSeconds: number;
+}
+
+/** Decides whether a successful connect follows an earlier "needs org owner
+ * approval" outcome, and how long the wait was. `pendingSinceMs` is the
+ * persisted timestamp set when that pending outcome first arrived; `null`
+ * means there was nothing to wait on, so there is nothing to celebrate. */
+export function computeApprovedAfterPending(
+  pendingSinceMs: number | null,
+  nowMs: number,
+): ApprovedAfterPendingOutcome {
+  if (pendingSinceMs === null) {
+    return { shouldCelebrate: false, waitSeconds: 0 };
+  }
+  return {
+    shouldCelebrate: true,
+    waitSeconds: Math.max(0, Math.round((nowMs - pendingSinceMs) / 1000)),
+  };
+}

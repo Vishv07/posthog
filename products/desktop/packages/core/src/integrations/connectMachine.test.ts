@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CONNECT_INITIAL_STATUS,
+  computeApprovedAfterPending,
   connectReducer,
   deriveConnectFlags,
   githubInvalidationKeys,
@@ -89,5 +90,30 @@ describe("invalidation keys", () => {
       ["integrations", "list"],
       ["integrations"],
     ]);
+  });
+});
+
+describe("computeApprovedAfterPending", () => {
+  it("does not celebrate when nothing was pending", () => {
+    expect(computeApprovedAfterPending(null, Date.now())).toEqual({
+      shouldCelebrate: false,
+      waitSeconds: 0,
+    });
+  });
+
+  it("celebrates and reports the elapsed wait when a pending timestamp is set", () => {
+    const pendingSince = 1_000;
+    const now = pendingSince + 90_000;
+    expect(computeApprovedAfterPending(pendingSince, now)).toEqual({
+      shouldCelebrate: true,
+      waitSeconds: 90,
+    });
+  });
+
+  it("never reports a negative wait if the clock moved backwards", () => {
+    expect(computeApprovedAfterPending(10_000, 1_000)).toEqual({
+      shouldCelebrate: true,
+      waitSeconds: 0,
+    });
   });
 });

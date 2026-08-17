@@ -2,6 +2,7 @@ import {
   CONNECT_INITIAL_STATUS,
   type ConnectError,
   type ConnectState,
+  computeApprovedAfterPending,
   connectReducer,
   deriveConnectFlags,
   githubInvalidationKeys,
@@ -10,13 +11,44 @@ import {
 import type { GithubConnectService } from "@posthog/core/integrations/githubConnectService";
 import { GITHUB_CONNECT_SERVICE } from "@posthog/core/integrations/identifiers";
 import { useService } from "@posthog/di/react";
+import { ANALYTICS_EVENTS } from "@posthog/shared/analytics-events";
 import { useAuthStateValue } from "@posthog/ui/features/auth/store";
 import { useIsOrgAdmin } from "@posthog/ui/features/auth/useOrgRole";
+import { useSettingsStore } from "@posthog/ui/features/settings/settingsStore";
+import { toast } from "@posthog/ui/primitives/toast";
+import { track } from "@posthog/ui/shell/analytics";
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import { useGitHubIntegrationCallback } from "./useGitHubIntegrationCallback";
 
 export { describeGithubConnectError } from "@posthog/core/integrations/connectErrors";
+
+/** GitHub connect succeeded: if the account was waiting on org owner approval,
+ * celebrate it — announce it, clear the wait, and default the next task to
+ * cloud now that GitHub can actually run one there. The single choke point for
+ * every surface that connects GitHub, since both `useGithubUserConnect` and
+ * `useGithubConnect` route their success through `useConnectStateMachine`. */
+function celebrateApprovalIfPending(): void {
+  const {
+    githubConnectPendingSince,
+    setGithubConnectPendingSince,
+    setLastUsedRunMode,
+  } = useSettingsStore.getState();
+  const { shouldCelebrate, waitSeconds } = computeApprovedAfterPending(
+    githubConnectPendingSince,
+    Date.now(),
+  );
+  if (!shouldCelebrate) return;
+  track(ANALYTICS_EVENTS.ONBOARDING_GITHUB_CONNECT_APPROVED_AFTER_PENDING, {
+    wait_seconds: waitSeconds,
+  });
+  setGithubConnectPendingSince(null);
+  setLastUsedRunMode("cloud");
+  toast.success(
+    "GitHub is connected",
+    "Your next tasks will run in the cloud.",
+  );
+}
 
 const IS_DEV = import.meta.env.DEV;
 
@@ -105,6 +137,7 @@ function useConnectStateMachine(
       stopPolling();
       dispatch({ type: "succeed" });
       invalidate(callbackProjectId ?? projectId);
+      celebrateApprovalIfPending();
       onConnectedRef.current?.();
     },
     onError: (cbError) => {

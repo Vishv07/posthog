@@ -148,6 +148,13 @@ interface SettingsStore {
   setLastPlanApprovalMode: (mode: ExecutionMode) => void;
   setDefaultReasoningEffort: (effort: DefaultReasoningEffort) => void;
 
+  // GitHub connect
+  // Epoch ms set when GitHub reports "needs org owner approval" for a connect
+  // attempt; null once approved (or never pending). Lets a later successful
+  // connect on any surface recognize it followed that wait and celebrate it.
+  githubConnectPendingSince: number | null;
+  setGithubConnectPendingSince: (value: number | null) => void;
+
   // Notifications
   desktopNotifications: boolean;
   dockBadgeNotifications: boolean;
@@ -363,6 +370,11 @@ export const useSettingsStore = create<SettingsStore>()(
       setDefaultCloudMessagingMode: (mode) =>
         set({ defaultCloudMessagingMode: mode }),
 
+      // GitHub connect
+      githubConnectPendingSince: null,
+      setGithubConnectPendingSince: (value) =>
+        set({ githubConnectPendingSince: value }),
+
       // Notifications
       ...NOTIFICATION_DEFAULTS,
       // Kept out of NOTIFICATION_DEFAULTS so "Reset to defaults" never discards
@@ -554,6 +566,9 @@ export const useSettingsStore = create<SettingsStore>()(
         defaultReasoningEffort: state.defaultReasoningEffort,
         defaultMessagingMode: state.defaultMessagingMode,
         defaultCloudMessagingMode: state.defaultCloudMessagingMode,
+
+        // GitHub connect
+        githubConnectPendingSince: state.githubConnectPendingSince,
 
         // Notifications
         desktopNotifications: state.desktopNotifications,

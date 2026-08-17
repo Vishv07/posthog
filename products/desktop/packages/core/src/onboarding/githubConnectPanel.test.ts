@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { GITHUB_CONNECT_TIMEOUT_MESSAGE } from "../integrations/connectErrors";
 import {
+  buildConnectAbandonedProps,
   buildConnectFailedProps,
   buildConnectFailureFingerprint,
   buildInstallationSettingsUrl,
@@ -170,6 +171,28 @@ describe("buildConnectFailedProps", () => {
         errorCode: null,
       }),
     ).toEqual({ reason: "error", error_type: undefined });
+  });
+});
+
+describe("buildConnectAbandonedProps", () => {
+  it("carries the flow type and rounds the elapsed seconds", () => {
+    expect(
+      buildConnectAbandonedProps({
+        flowType: "user_new",
+        startedAtMs: 1_000,
+        nowMs: 1_000 + 12_400,
+      }),
+    ).toEqual({ flow_type: "user_new", seconds_since_started: 12 });
+  });
+
+  it("never reports a negative duration", () => {
+    expect(
+      buildConnectAbandonedProps({
+        flowType: "team_existing",
+        startedAtMs: 10_000,
+        nowMs: 1_000,
+      }),
+    ).toEqual({ flow_type: "team_existing", seconds_since_started: 0 });
   });
 });
 

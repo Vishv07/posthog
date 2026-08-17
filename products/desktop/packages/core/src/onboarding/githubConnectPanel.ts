@@ -1,3 +1,4 @@
+import type { OnboardingGithubConnectFlow } from "@posthog/shared/analytics-events";
 import { GITHUB_CONNECT_TIMEOUT_MESSAGE } from "../integrations/connectErrors";
 import { POSTHOG_GITHUB_APP_URL } from "../integrations/githubApp";
 
@@ -91,6 +92,29 @@ export function buildConnectFailedProps(
   return {
     reason: inputs.timedOut ? "timeout" : "error",
     error_type: inputs.errorCode ?? undefined,
+  };
+}
+
+export interface ConnectAbandonedInputs {
+  flowType: OnboardingGithubConnectFlow;
+  startedAtMs: number;
+  nowMs: number;
+}
+
+export interface ConnectAbandonedProps {
+  flow_type: OnboardingGithubConnectFlow;
+  seconds_since_started: number;
+}
+
+export function buildConnectAbandonedProps(
+  inputs: ConnectAbandonedInputs,
+): ConnectAbandonedProps {
+  return {
+    flow_type: inputs.flowType,
+    seconds_since_started: Math.max(
+      0,
+      Math.round((inputs.nowMs - inputs.startedAtMs) / 1000),
+    ),
   };
 }
 

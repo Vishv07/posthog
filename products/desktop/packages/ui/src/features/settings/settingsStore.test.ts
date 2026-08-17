@@ -261,6 +261,7 @@ describe("feature settingsStore cloud selections", () => {
     ["slotMachineMode", false, true],
     ["dismissibleUpdateBanners", false, true],
     ["showSidebarWorktrees", false, true],
+    ["githubConnectPendingSince", null, 1_700_000_000_000],
   ] as const)("rehydrates %s", async (field, initial, persisted) => {
     getItem.mockResolvedValue(
       JSON.stringify({ state: { [field]: persisted }, version: 0 }),
