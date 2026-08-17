@@ -24,6 +24,8 @@ from posthog.exceptions_capture import capture_exception
 from posthog.models import Organization, OrganizationIntegration, Team, User
 from posthog.models.organization import OrganizationMembership
 from posthog.ph_client import feature_enabled_or_false
+from posthog.rbac.user_access_control import UserAccessControl
+from posthog.user_permissions import UserPermissions
 from posthog.utils import get_trusted_client_ip, relative_date_parse
 
 from ee.billing.billing_manager import BillingManager
@@ -34,7 +36,7 @@ logger = structlog.get_logger(__name__)
 
 BILLING_SERVICE_JWT_AUD = "posthog:license-key"
 
-MEMBER_BILLING_USAGE_ACCESS_FLAG = "member-billing-usage-access"
+MEMBER_BILLING_USAGE_SPEND_READ_ACCESS_FLAG = "member-billing-usage-spend-read-access"
 OWNER_ONLY_BILLING_FLAG = "owner-only-billing"
 
 
@@ -64,14 +66,16 @@ def _org_flag_enabled(flag_key: str, organization: Organization) -> bool:
     )
 
 
-class CanViewBillingUsage(permissions.BasePermission):
+class CanReadBillingUsageAndSpend(permissions.BasePermission):
     """
-    Permission for the read-only billing usage/spend endpoints. Org admins (level >= ADMIN) are
-    always allowed. Plain members are allowed only when the `member-billing-usage-access` flag is
-    enabled for the organization and `owner-only-billing` is not (evaluation fails closed).
+    Permission for the read-only billing usage/spend endpoints. `owner-only-billing` restricts them
+    to owners (including over admins); otherwise admins are allowed, and the
+    `member-billing-usage-spend-read-access` flag lowers the bar to plain members. Flag evaluation
+    fails closed, and the precedence mirrors `getMinimumUsageSpendReadAccessLevel` in
+    billing-utils.ts and `HasBillingDataAccess` in the billing service.
     """
 
-    message = "You need to be an organization administrator to view billing usage data."
+    message = "You do not have the permissions required to view billing usage and spend data."
 
     def has_permission(self, request: Request, view: Any) -> bool:
         try:
@@ -81,11 +85,11 @@ class CanViewBillingUsage(permissions.BasePermission):
         membership = OrganizationMembership.objects.filter(user=cast(User, request.user), organization=org).first()
         if membership is None:
             return False
+        if _org_flag_enabled(OWNER_ONLY_BILLING_FLAG, org):
+            return membership.level >= OrganizationMembership.Level.OWNER
         if membership.level >= OrganizationMembership.Level.ADMIN:
             return True
-        return _org_flag_enabled(MEMBER_BILLING_USAGE_ACCESS_FLAG, org) and not _org_flag_enabled(
-            OWNER_ONLY_BILLING_FLAG, org
-        )
+        return _org_flag_enabled(MEMBER_BILLING_USAGE_SPEND_READ_ACCESS_FLAG, org)
 
 
 class BillingSerializer(serializers.Serializer):
@@ -141,6 +145,19 @@ class BillingPeriodResponseSerializer(serializers.Serializer):
         allow_null=True,
         help_text="End of the organization's current billing period, or null when billing has not synced a period.",
     )
+
+
+def _member_accessible_team_ids(user: User, organization: Organization) -> list[int]:
+    """
+    Ids of this org's teams the user can access, mirroring
+    OrganizationSerializer._fetch_visible_teams. Scoped to the queried org explicitly:
+    User.teams gates private-project filtering on the features of the user's *first*
+    org, which for multi-org users can differ from the org being billed.
+    """
+    access_control = UserAccessControl(user=user, organization_id=str(organization.id))
+    visible_teams = access_control.filter_queryset_by_access_level(organization.teams.all(), include_all_if_admin=True)
+    visible_team_ids = UserPermissions(user=user).team_ids_visible_for_user
+    return list(visible_teams.filter(id__in=visible_team_ids).values_list("id", flat=True))
 
 
 def _parse_team_ids(raw_team_ids: str) -> list[int]:
@@ -620,7 +637,7 @@ class BillingViewset(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
         methods=["GET"],
         detail=False,
         url_path="usage",
-        permission_classes=[permissions.IsAuthenticated, CanViewBillingUsage],
+        permission_classes=[permissions.IsAuthenticated, CanReadBillingUsageAndSpend],
     )
     def usage(self, request: Request, *args: Any, **kwargs: Any) -> HttpResponse:
         return self._usage_or_spend_response(request, self.get_billing_manager().get_usage_data)
@@ -629,7 +646,7 @@ class BillingViewset(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
         methods=["GET"],
         detail=False,
         url_path="spend",
-        permission_classes=[permissions.IsAuthenticated, CanViewBillingUsage],
+        permission_classes=[permissions.IsAuthenticated, CanReadBillingUsageAndSpend],
     )
     def spend(self, request: Request, *args: Any, **kwargs: Any) -> HttpResponse:
         """Endpoint to fetch spend data (proxy to billing service)."""
@@ -648,8 +665,7 @@ class BillingViewset(TeamAndOrgViewSetMixin, viewsets.GenericViewSet):
         # projects never reach the billing service (which cannot enforce per-team access itself).
         accessible_team_ids: Optional[list[int]] = None
         if not self._is_org_admin(request, organization):
-            user = cast(User, request.user)
-            accessible_team_ids = list(user.teams.filter(organization=organization).values_list("id", flat=True))
+            accessible_team_ids = _member_accessible_team_ids(cast(User, request.user), organization)
             accessible_set = set(accessible_team_ids)
             raw_team_ids = params_to_pass.get("team_ids")
             if raw_team_ids:
