@@ -37,7 +37,6 @@ import { OptionalBadge } from "@posthog/ui/features/onboarding/components/Option
 import { PANEL_SHADOW } from "@posthog/ui/features/onboarding/components/onboardingStyles";
 import { useProjectsWithIntegrations } from "@posthog/ui/features/onboarding/hooks/useProjectsWithIntegrations";
 import { useOnboardingStore } from "@posthog/ui/features/onboarding/onboardingStore";
-import { useSettingsStore } from "@posthog/ui/features/settings/settingsStore";
 import { track } from "@posthog/ui/shell/analytics";
 import { openExternalUrl } from "@posthog/ui/shell/openExternal";
 import {
@@ -158,9 +157,10 @@ export function GitHubConnectPanel() {
     const fingerprint = buildConnectFailureFingerprint(failureInputs);
     if (!connectService.shouldReportFailure(fingerprint)) return;
     if (isPendingApproval) {
-      if (useSettingsStore.getState().githubConnectPendingSince === null) {
-        useSettingsStore.getState().setGithubConnectPendingSince(Date.now());
-      }
+      // The pending marker that arms the later "approved after pending"
+      // celebration is written at the shared connect choke point
+      // (useConnectStateMachine) so every surface records it. This event stays
+      // onboarding-scoped and carries the onboarding flow_type.
       track(ANALYTICS_EVENTS.ONBOARDING_GITHUB_CONNECT_PENDING_ADMIN, {
         flow_type: flowType,
       });

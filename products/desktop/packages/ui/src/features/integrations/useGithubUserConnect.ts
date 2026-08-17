@@ -1,3 +1,4 @@
+import { isGithubConnectPendingApproval } from "@posthog/core/integrations/connectErrors";
 import {
   CONNECT_INITIAL_STATUS,
   type ConnectError,
@@ -48,6 +49,21 @@ function celebrateApprovalIfPending(): void {
     "GitHub is connected",
     "Your next tasks will run in the cloud.",
   );
+}
+
+/** GitHub connect is waiting on org owner approval: record when the wait
+ * started, once, so a later successful connect from any surface can be
+ * celebrated as an approval. Lives at the shared choke point rather than in a
+ * single component because the pending callback reaches whichever surface is
+ * mounted — and on a cold start, only whichever drains it first — so writing
+ * it here keeps the marker from being lost when the pending outcome lands
+ * somewhere other than the onboarding panel, or after that panel unmounts. */
+function recordPendingApprovalWait(errorCode: string | null): void {
+  if (!isGithubConnectPendingApproval(errorCode)) return;
+  const { githubConnectPendingSince, setGithubConnectPendingSince } =
+    useSettingsStore.getState();
+  if (githubConnectPendingSince !== null) return;
+  setGithubConnectPendingSince(Date.now());
 }
 
 const IS_DEV = import.meta.env.DEV;
@@ -143,6 +159,7 @@ function useConnectStateMachine(
     onError: (cbError) => {
       stopPolling();
       dispatch({ type: "fail", error: cbError });
+      recordPendingApprovalWait(cbError.code);
     },
     onTimedOut: () => {
       stopPolling();
