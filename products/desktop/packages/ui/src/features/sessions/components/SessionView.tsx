@@ -858,7 +858,11 @@ export function SessionView({
                                 taskId={taskId}
                                 task={task}
                               />
-                              <ContextUsageIndicator usage={contextUsage} />
+                              <ContextUsageIndicator
+                                usage={contextUsage}
+                                taskId={taskId}
+                                focused={isActiveSession !== false}
+                              />
                             </>
                           }
                           onToggleMessagingMode={toggleMessagingMode}
