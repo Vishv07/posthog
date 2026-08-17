@@ -123,7 +123,7 @@ class TestIcpLists(BaseTest):
             tags_path,
             "--investors-csv",
             investors_path,
-            "--version",
+            "--list-version",
             "2026-08-13",
             "--activate",
         )
@@ -143,7 +143,7 @@ class TestIcpLists(BaseTest):
             tags_path,
             "--investors-csv",
             investors_path,
-            "--version",
+            "--list-version",
             "new",
             "--activate",
         )
@@ -161,7 +161,7 @@ class TestIcpLists(BaseTest):
                 tags_path,
                 "--investors-csv",
                 investors_path,
-                "--version",
+                "--list-version",
                 "dup",
             )
 
@@ -175,6 +175,6 @@ class TestIcpLists(BaseTest):
                 empty_path,
                 "--investors-csv",
                 investors_path,
-                "--version",
+                "--list-version",
                 "fresh",
             )

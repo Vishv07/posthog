@@ -46,11 +46,12 @@ class Command(BaseCommand):
     def add_arguments(self, parser: CommandParser) -> None:
         parser.add_argument("--tags-csv", required=True, help="Path to the tag-list sheet export")
         parser.add_argument("--investors-csv", required=True, help="Path to the quality-investor sheet export")
-        parser.add_argument("--version", required=True, help="Version label for the new row, e.g. 2026-08-13")
+        # not --version: that collides with the built-in flag every Django command inherits
+        parser.add_argument("--list-version", required=True, help="Version label for the new row, e.g. 2026-08-13")
         parser.add_argument("--activate", action="store_true", help="Make the new row the active one")
 
     def handle(self, *args: Any, **options: Any) -> None:
-        version: str = options["version"]
+        version: str = options["list_version"]
         if IcpScoringConfig.objects.filter(version=version).exists():
             raise CommandError(f"IcpScoringConfig version {version!r} already exists; pick a new version")
 
