@@ -55,6 +55,10 @@ class TestTransientDatabaseErrorReporting:
                     psycopg.errors.AdminShutdown("terminating connection due to administrator command"),
                 ),
             ),
+            (
+                "pooler_backend_crashed",
+                _wrapped_by_django("server conn crashed?", psycopg.errors.ProtocolViolation("server conn crashed?")),
+            ),
         ]
     )
     async def test_transient_db_errors_are_not_reported(self, _name, error):
@@ -72,6 +76,14 @@ class TestTransientDatabaseErrorReporting:
                 OperationalError(
                     'connection failed: connection to server at "127.0.0.1", port 6432 failed: '
                     'FATAL:  password authentication failed for user "posthog"'
+                ),
+            ),
+            # Only pgbouncer's "server conn crashed?" is transient; SQLSTATE 08P01 as a class is
+            # not, so a protocol violation with any other message must still be reported.
+            (
+                "unexpected_protocol_violation",
+                _wrapped_by_django(
+                    "insufficient data in message", psycopg.errors.ProtocolViolation("insufficient data in message")
                 ),
             ),
         ]
