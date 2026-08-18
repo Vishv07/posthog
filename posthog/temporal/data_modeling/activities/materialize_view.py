@@ -859,7 +859,7 @@ async def _vacuum(delta_table: deltalake.DeltaTable, logger: FilteringBoundLogge
     )
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(frozen=True)
 class ClearCDPStagingInputs:
     team_id: int
     saved_query_id: str
