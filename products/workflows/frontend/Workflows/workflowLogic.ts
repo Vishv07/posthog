@@ -739,6 +739,14 @@ export interface workflowLogicActions {
                                       type: 'data-warehouse-table'
                                   }
                                 | {
+                                      filters: {
+                                          properties?: any[] | undefined
+                                      }
+                                      key_property?: string | undefined
+                                      table_name: string
+                                      type: 'data-warehouse-view'
+                                  }
+                                | {
                                       inputs: Record<
                                           string,
                                           {
@@ -989,6 +997,14 @@ export interface workflowLogicActions {
                             key_property?: string | undefined
                             table_name: string
                             type: 'data-warehouse-table'
+                        }
+                      | {
+                            filters: {
+                                properties?: any[] | undefined
+                            }
+                            key_property?: string | undefined
+                            table_name: string
+                            type: 'data-warehouse-view'
                         }
                       | {
                             inputs: Record<
@@ -1533,6 +1549,14 @@ export interface workflowLogicActions {
                                       type: 'data-warehouse-table'
                                   }
                                 | {
+                                      filters: {
+                                          properties?: any[] | undefined
+                                      }
+                                      key_property?: string | undefined
+                                      table_name: string
+                                      type: 'data-warehouse-view'
+                                  }
+                                | {
                                       inputs: Record<
                                           string,
                                           {
@@ -1783,6 +1807,14 @@ export interface workflowLogicActions {
                             key_property?: string | undefined
                             table_name: string
                             type: 'data-warehouse-table'
+                        }
+                      | {
+                            filters: {
+                                properties?: any[] | undefined
+                            }
+                            key_property?: string | undefined
+                            table_name: string
+                            type: 'data-warehouse-view'
                         }
                       | {
                             inputs: Record<
@@ -2052,6 +2084,14 @@ export interface workflowLogicActions {
                   key_property?: string | undefined
                   table_name: string
                   type: 'data-warehouse-table'
+              }
+            | {
+                  filters: {
+                      properties?: any[] | undefined
+                  }
+                  key_property?: string | undefined
+                  table_name: string
+                  type: 'data-warehouse-view'
               }
             | {
                   inputs: Record<
@@ -2400,6 +2440,14 @@ export interface workflowLogicActions {
                   type: 'data-warehouse-table'
               }
             | {
+                  filters: {
+                      properties?: any[] | undefined
+                  }
+                  key_property?: string | undefined
+                  table_name: string
+                  type: 'data-warehouse-view'
+              }
+            | {
                   inputs: Record<
                       string,
                       {
@@ -2655,6 +2703,14 @@ export interface workflowLogicMeta {
                                 key_property?: string | undefined
                                 table_name: string
                                 type: 'data-warehouse-table'
+                            }
+                          | {
+                                filters: {
+                                    properties?: any[] | undefined
+                                }
+                                key_property?: string | undefined
+                                table_name: string
+                                type: 'data-warehouse-view'
                             }
                           | {
                                 inputs: Record<
