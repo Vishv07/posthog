@@ -1913,9 +1913,17 @@ jobs:
                   python manage.py makemigrations --check --dry-run
 
             - name: Check CH migrations
+              env:
+                  BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || 'master' }}
               run: |
-                  # Same as above, except now for CH looking at files that were added in posthog/clickhouse/migrations/
-                  git diff --name-status origin/master..HEAD | grep "A\sposthog/clickhouse/migrations/" | grep -v README | awk '{print $2}' | python manage.py test_ch_migrations_are_safe
+                  # Same as above, except now for CH looking at files that were added in posthog/clickhouse/migrations/.
+                  # Diff against the PR's own base: a stacked PR inherits its parent branch's migration, and
+                  # counting that against this PR trips the one-migration-per-PR rule for a file it doesn't own.
+                  git fetch --no-tags --depth=1 --filter=blob:none origin "$BASE_REF:refs/remotes/origin/$BASE_REF" || true
+                  BASE="origin/$BASE_REF"
+                  # Base branch already merged and deleted, or unfetchable — master still gives a usable diff.
+                  git rev-parse --verify --quiet "$BASE^{commit}" > /dev/null || BASE=origin/master
+                  git diff --name-status "$BASE..HEAD" | grep "A\sposthog/clickhouse/migrations/" | grep -v README | awk '{print $2}' | python manage.py test_ch_migrations_are_safe
 
             - name: Render CH migration SQL per cloud environment
               # CH migrations can build different `operations` lists at import time depending on
