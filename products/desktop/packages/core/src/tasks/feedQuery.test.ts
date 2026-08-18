@@ -361,6 +361,38 @@ describe("feedQuery", () => {
       expect(plan.issues.map((i) => i.kind)).toEqual(["unknown-value"]);
     });
 
+    it.each([
+      ["origin:desktop", "user_created"],
+      ["origin:scout", "signals_scout"],
+      ["origin:ai", "posthog_ai"],
+      ["origin:slack", "slack"],
+      ["origin:hogdesk", "hogdesk"],
+    ])("aliases %s onto the origin enum", (query, expected) => {
+      const plan = planFeedQuery(parseFeedQuery(query), context);
+      expect(plan.requests).toEqual([{ originProduct: expected }]);
+    });
+
+    it("aliases origins inside OR groups and negations", () => {
+      const plan = planFeedQuery(
+        parseFeedQuery("origin:scout origin:desktop"),
+        context,
+      );
+      expect(plan.requests).toEqual([
+        { originProduct: "signals_scout" },
+        { originProduct: "user_created" },
+      ]);
+      expect(plan.matches(task({ origin_product: "signals_scout" }))).toBe(
+        true,
+      );
+      expect(plan.matches(task({ origin_product: "slack" }))).toBe(false);
+
+      const negated = planFeedQuery(parseFeedQuery("-origin:scout"), context);
+      expect(negated.matches(task({ origin_product: "signals_scout" }))).toBe(
+        false,
+      );
+      expect(negated.matches(task({ origin_product: "slack" }))).toBe(true);
+    });
+
     it("compiles is:pinned into the pinned request param", () => {
       const plan = planFeedQuery(parseFeedQuery("is:pinned"), context);
       expect(plan.requests).toEqual([{ pinned: true }]);
