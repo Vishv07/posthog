@@ -31,7 +31,7 @@ A **relationship definition** is a team-defined relationship type between a Post
 ### Important notes
 
 - Active assignments are `ended_at IS NULL`; ended rows are kept as history.
-- The role keys in `system.accounts.properties` (`csm`, `account_executive`, `account_owner`) mirror the active assignments and include the user's email; the relationships table has only `user_id`.
+- Role keys sometimes visible in `system.accounts.properties` (`csm`, `account_executive`, `account_owner`) are retired leftovers and may be stale; the relationship tables are the only source of truth for roles.
 
 ## Custom properties (`system.custom_property_definitions`)
 
@@ -66,14 +66,6 @@ FROM system.account_relationships r
 JOIN system.account_relationship_definitions d ON d.id = r.definition_id
 JOIN system.accounts a ON a.id = r.account_id
 WHERE a.name ILIKE '%acme%' AND r.ended_at IS NULL
-```
-
-Shortcut when the email is enough — the role keys on `properties` mirror active assignments:
-
-```sql
-SELECT name, properties.csm.email AS csm_email
-FROM system.accounts
-WHERE name ILIKE '%acme%'
 ```
 
 **All accounts a user holds a relationship on:**
