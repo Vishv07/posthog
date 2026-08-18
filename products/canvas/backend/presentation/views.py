@@ -3,7 +3,7 @@ from typing import Any, cast
 from uuid import UUID
 
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db import transaction
+from django.db import connection, transaction
 from django.db.models import Q, QuerySet
 from django.utils import timezone
 
@@ -1209,7 +1209,10 @@ class CanvasViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
         operation_id="canvases_home_create",
         request=None,
         responses={
-            200: CanvasSerializer,
+            200: OpenApiResponse(response=CanvasSerializer, description="The caller's existing home canvas."),
+            201: OpenApiResponse(
+                response=CanvasSerializer, description="A home canvas was provisioned for the caller."
+            ),
             403: OpenApiResponse(description="Home is a viewer surface; sandbox tokens cannot provision it."),
         },
     )
@@ -1227,13 +1230,19 @@ class CanvasViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
                 {"detail": "Home is a viewer surface; sandbox tokens cannot provision it."},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        preference = (
-            CanvasHomePreference.objects.for_team(self.team_id).select_related("canvas").filter(user=user).first()
-        )
-        if preference is not None and not preference.canvas.deleted:
-            return Response(CanvasSerializer(preference.canvas).data)
+        existing = self._home_canvas_for(user)
+        if existing is not None:
+            return Response(CanvasSerializer(existing).data)
         channel_id = tasks_facade.ensure_personal_channel_id(self.team_id, user.id)
         with transaction.atomic():
+            # Serialize provisioning per user: two concurrent first-opens (two
+            # tabs, or desktop plus web) would otherwise both miss the read above
+            # and each create a "Home" canvas, leaving one orphaned. Re-read under
+            # the lock so the loser returns the winner's canvas instead.
+            self._lock_home_provisioning(user.id)
+            existing = self._home_canvas_for(user)
+            if existing is not None:
+                return Response(CanvasSerializer(existing).data)
             canvas = Canvas.objects.create(
                 team_id=self.team_id,
                 channel_id=channel_id,
@@ -1254,6 +1263,31 @@ class CanvasViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
         self._log_canvas_activity(canvas, "created", Detail(name=canvas.name))
         self._report_canvas_action("canvas home provisioned", canvas)
         return Response(CanvasSerializer(canvas).data, status=status.HTTP_201_CREATED)
+
+    def _lock_home_provisioning(self, user_id: int) -> None:
+        """Serialize home provisioning for one user inside the current transaction.
+
+        There is no preference row to lock before the first provision, so a
+        transaction-scoped advisory lock guards the read-then-create window.
+        """
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                [f"canvas_home:{self.team_id}:{user_id}"],
+            )
+
+    def _home_canvas_for(self, user: User) -> Canvas | None:
+        """The user's home canvas, or None when there is none to open.
+
+        Deleting a canvas is a soft delete that leaves the pointer behind, so a
+        pointer at a deleted canvas means "no home set", not a broken home.
+        """
+        preference = (
+            CanvasHomePreference.objects.for_team(self.team_id).select_related("canvas").filter(user=user).first()
+        )
+        if preference is None or preference.canvas.deleted:
+            return None
+        return preference.canvas
 
     @extend_schema(
         operation_id="canvases_build_action_create",
