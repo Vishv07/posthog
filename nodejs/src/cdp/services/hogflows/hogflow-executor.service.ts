@@ -180,7 +180,8 @@ export class HogFlowExecutorService {
             if (
                 trigger.type !== 'event' &&
                 trigger.type !== 'data-warehouse-table' &&
-                trigger.type !== 'slack-message'
+                trigger.type !== 'slack-message' &&
+                trigger.type !== 'github-event'
             ) {
                 continue
             }

@@ -20,7 +20,7 @@ import { counterParseError } from './metrics'
 // Trigger types started from this topic. Deliberately an explicit list rather than "any workflow
 // whose trigger is an event": internal events share the topic with error tracking and activity log
 // signals, and an event-triggered workflow expects those to arrive via analytics capture, not here.
-const INTERNAL_EVENT_TRIGGER_TYPES = new Set(['slack-message'])
+const INTERNAL_EVENT_TRIGGER_TYPES = new Set(['slack-message', 'github-event'])
 
 const SLACK_MESSAGE_RECEIVED_EVENT = '$slack_message_received'
 
