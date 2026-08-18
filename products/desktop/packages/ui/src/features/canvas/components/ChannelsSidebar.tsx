@@ -14,7 +14,7 @@ import { useCurrentChannel } from "@posthog/ui/features/canvas/hooks/useCurrentC
 import { useMarkChannelSeen } from "@posthog/ui/features/canvas/hooks/useMarkChannelSeen";
 import { useTrackChannelsSpaceViewed } from "@posthog/ui/features/canvas/hooks/useTrackChannelsSpaceViewed";
 import {
-  consumeKeepListForNextRoute,
+  shouldKeepListForRoute,
   showChannelList,
   showChannelPane,
   useChannelPaneStore,
@@ -188,7 +188,7 @@ export function ChannelsSidebar() {
     // it, so the slider follows the route even if the list was being browsed.
     // Unless the navigation said otherwise: opening a session from the list's
     // tree loads it without taking the tree off the screen.
-    if (!consumeKeepListForNextRoute()) showChannelPane();
+    if (!shouldKeepListForRoute(routeChannelId)) showChannelPane();
   }, [channelsLayout, routeChannelId, setCurrentChannel]);
 
   // Browsing the list is view state, not navigation: you stay in the channel
