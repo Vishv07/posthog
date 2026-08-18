@@ -51,10 +51,17 @@ SCANNER_SCHEDULE_INTERVAL = dt.timedelta(minutes=5)
 # pass that picks up sessions whose matching events were older than the fast pass's narrow window.
 # Paired with SWEEP_EVENTS_LOOKBACK: that sets what the fast pass can miss, this sets how long a miss
 # waits, so tuning either one moves the same cost-against-latency tradeoff.
-DEEP_SWEEP_INTERVAL = dt.timedelta(hours=6)
+DEEP_SWEEP_INTERVAL = dt.timedelta(hours=12)
 # The deep pass shares the sweep activity's time budget with the fast query, so it gets the smaller
 # share: it is catch-up work, and a tick that overruns retries both queries.
 DEEP_SWEEP_MAX_EXECUTION_SECONDS = 60
+
+# Ceiling on the deep pass's own cadence stretch: 14 x 12h is 7 days, inside the 30-day minimum
+# replay retention across teams running scanners, past which a straggler cannot be observed anyway.
+DEEP_SWEEP_MAX_FACTOR = 14
+# The deep pass is priced on its average daily reads over this window. It has to exceed the longest
+# interval above (7 days), or a stretched pass ages out of its own measurement and resets to the floor.
+DEEP_SPEND_WINDOW_DAYS = 8
 
 # Rolling 24h ClickHouse read budget per scanner. Above it, sweeps stretch their effective cadence
 # proportionally (skipped ticks batch into the next executed one, so no sessions are missed).

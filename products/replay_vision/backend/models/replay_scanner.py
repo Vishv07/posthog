@@ -161,10 +161,20 @@ class ReplayScanner(UUIDModel):
         blank=True,
         help_text="ClickHouse read bytes per hour bucket (ISO hour -> bytes), maintained by the read-metering workflow; drives the sweep throttle.",
     )
+    fast_read_bytes_by_hour = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="ClickHouse read bytes per hour bucket for the frequent sweep's own queries; drives its throttle, so backfill and catch-up reads do not stretch the cadence users see.",
+    )
+    deep_read_bytes_by_hour = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="ClickHouse read bytes per hour bucket for the deep catch-up pass only; drives its own cadence stretch independently of the frequent sweep.",
+    )
     sweep_throttle_factor_override = models.PositiveSmallIntegerField(
         null=True,
         blank=True,
-        help_text="Manual cadence-stretch multiplier; overrides the computed read-budget throttle. 1 disables throttling; null means automatic.",
+        help_text="Manual cadence-stretch multiplier for the frequent sweep; overrides its computed read-budget throttle. 1 disables throttling; null means automatic. Does not affect the deep catch-up pass, which stretches on its own spend.",
     )
 
     # Shape: ScannerExperimentTargetingSerializer. Stored because the compiled `query` speaks flag

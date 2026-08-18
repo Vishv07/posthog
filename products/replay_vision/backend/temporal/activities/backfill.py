@@ -26,7 +26,10 @@ from products.replay_vision.backend.models.replay_scanner_backfill import (
     ReplayScannerBackfill,
 )
 from products.replay_vision.backend.queries import excluded_sessions
-from products.replay_vision.backend.queries.scanner_candidate_query import WindowedCandidateQuery
+from products.replay_vision.backend.queries.scanner_candidate_query import (
+    BACKFILL_CANDIDATE_QUERY_TYPE,
+    WindowedCandidateQuery,
+)
 from products.replay_vision.backend.quota import compute_scanner_budget, quota_state
 from products.replay_vision.backend.temporal.activities.count_in_flight_applies import (
     count_in_flight,
@@ -162,7 +165,7 @@ def find_backfill_candidates_activity(inputs: FindBackfillCandidatesInputs) -> F
         query=query,
         window_start=backfill.window_start,
         window_end=backfill.window_end,
-        query_type="ReplayVisionBackfillCandidateQuery",
+        query_type=BACKFILL_CANDIDATE_QUERY_TYPE,
         sampling_rate=snapshot.sampling_rate,
         # Same salt as the live sweep, so a sampled scanner backfills the same deterministic bucket it scans live.
         sampling_salt=str(backfill.scanner_id),

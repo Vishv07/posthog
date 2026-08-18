@@ -40,6 +40,14 @@ _PARTITION_LOOKBACK = dt.timedelta(hours=26)
 # deep sweep instead (see `find_scanner_candidates_activity`), which scans the full lookback.
 SWEEP_EVENTS_LOOKBACK = dt.timedelta(hours=4)
 
+# ClickHouse query-log tags. The read meter matches on these to attribute spend per pass, so a tag
+# that drifts from its caller silently stops that pass being throttled.
+BACKFILL_CANDIDATE_QUERY_TYPE = "ReplayVisionBackfillCandidateQuery"
+BACKFILL_COUNT_QUERY_TYPE = "ReplayVisionBackfillCountQuery"
+DEEP_SWEEP_CANDIDATE_QUERY_TYPE = "ReplayVisionDeepSweepCandidateQuery"
+SWEEP_CANDIDATE_QUERY_TYPE = "ReplayVisionScannerCandidateQuery"
+EXCLUDED_SESSIONS_QUERY_TYPE = "ReplayVisionExcludedSessionsQuery"
+
 SAMPLE_RATE_PRECISION = 10_000
 # Smallest non-zero rate the modulo bucketing can express (one bucket); the API rejects non-zero rates below it.
 MIN_SAMPLING_RATE = 1 / SAMPLE_RATE_PRECISION
@@ -212,7 +220,7 @@ class ScannerCandidateQuery:
         rows = execute_candidate_query(
             self.get_query(),
             team=self._team,
-            query_type="ReplayVisionScannerCandidateQuery",
+            query_type=SWEEP_CANDIDATE_QUERY_TYPE,
             max_execution_time_seconds=self._max_execution_time_seconds,
             scanner_id=self._scanner_id,
         )

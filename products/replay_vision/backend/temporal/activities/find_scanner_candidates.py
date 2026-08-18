@@ -15,6 +15,7 @@ from products.replay_vision.backend.models.replay_observation import ReplayObser
 from products.replay_vision.backend.models.replay_scanner import SETTLE_INTERVAL, ReplayScanner
 from products.replay_vision.backend.queries import excluded_sessions
 from products.replay_vision.backend.queries.scanner_candidate_query import (
+    DEEP_SWEEP_CANDIDATE_QUERY_TYPE,
     DEFAULT_CANDIDATE_LIMIT,
     SWEEP_EVENTS_LOOKBACK,
     CandidateSession,
@@ -29,7 +30,12 @@ from products.replay_vision.backend.temporal.constants import (
 )
 from products.replay_vision.backend.temporal.decorators import track_activity
 from products.replay_vision.backend.temporal.metrics import record_sweep_outcome
-from products.replay_vision.backend.temporal.read_meter_types import sweep_spend_bytes_24h, sweep_throttle_factor
+from products.replay_vision.backend.temporal.read_meter_types import (
+    deep_spend_bytes_per_day,
+    deep_sweep_throttle_factor,
+    sweep_spend_bytes_24h,
+    sweep_throttle_factor,
+)
 from products.replay_vision.backend.temporal.sweep_types import (
     CandidateSessionPayload,
     FindScannerCandidatesInputs,
@@ -111,7 +117,19 @@ def find_scanner_candidates_activity(inputs: FindScannerCandidatesInputs) -> Fin
         # tick: seeding only once headroom frees up would leave the range in between with no deep pass.
         deep_swept_through = scanner.last_swept_at
     elif deep_limit > 0:
-        deep_candidates, deep_swept_through = _deep_sweep(scanner, query, candidate_query, deep_limit)
+        try:
+            deep_candidates, deep_swept_through = _deep_sweep(
+                scanner,
+                query,
+                candidate_query,
+                deep_limit,
+                seconds_remaining=FIND_SCANNER_CANDIDATES_TIMEOUT.total_seconds() - (time.monotonic() - started_at),
+            )
+        except Exception:
+            # Best-effort catch-up must never fail the tick: the fast pass has already found and
+            # filtered its candidates, and losing them to a retry costs their reads again.
+            activity.logger.warning("replay_vision.deep_sweep_failed", extra={"scanner_id": str(scanner.id)})
+            record_sweep_outcome("deep_sweep_failed")
 
     record_sweep_outcome(
         "candidates_found" if candidates or deep_candidates else "no_candidates",
@@ -140,10 +158,12 @@ def _throttled(scanner: ReplayScanner) -> bool:
     The factor stretches the effective cadence: factor N means one executed sweep per N schedule
     intervals. Distance is measured watermark-to-settle-horizon, so a saturated keyset walk (watermark
     lagging behind the horizon) is never throttled harder while it drains its backlog.
+
+    Metered on this pass's own queries, so backfill and catch-up reads cannot stretch it.
     """
     now = dt.datetime.now(dt.UTC)
     factor = sweep_throttle_factor(
-        sweep_spend_bytes_24h(scanner.sweep_read_bytes_by_hour, now),
+        sweep_spend_bytes_24h(scanner.fast_read_bytes_by_hour, now),
         scanner.sweep_throttle_factor_override,
     )
     if factor <= 1:
@@ -151,8 +171,24 @@ def _throttled(scanner: ReplayScanner) -> bool:
     return (now - SETTLE_INTERVAL) - scanner.last_swept_at < SCANNER_SCHEDULE_INTERVAL * factor
 
 
+def _deep_execution_budget(factor: int, seconds_remaining: float) -> int:
+    """ClickHouse budget for one deep query, scaled by how wide the stretch made its window.
+
+    A stretched pass scans proportionally more, so a fixed budget would time it out at exactly the
+    scanners the stretch exists for. Bounded by what is left of the activity: overrunning kills the
+    attempt after the fast pass already paid for its own reads.
+    """
+    reserve = DEEP_SWEEP_MAX_EXECUTION_SECONDS
+    return max(1, min(DEEP_SWEEP_MAX_EXECUTION_SECONDS * factor, int(seconds_remaining - reserve)))
+
+
 def _deep_sweep(
-    scanner: ReplayScanner, query: RecordingsQuery, fast_query: ScannerCandidateQuery, limit: int
+    scanner: ReplayScanner,
+    query: RecordingsQuery,
+    fast_query: ScannerCandidateQuery,
+    limit: int,
+    *,
+    seconds_remaining: float,
 ) -> tuple[list[CandidateSession], dt.datetime | None]:
     """Catch-up pass behind the fast watermark with the full events lookback.
 
@@ -163,7 +199,13 @@ def _deep_sweep(
     """
     assert scanner.last_deep_swept_at is not None  # seeded by the caller before the first pass runs
     now = timezone.now()
-    if now - scanner.last_deep_swept_at < DEEP_SWEEP_INTERVAL or scanner.last_deep_swept_at >= scanner.last_swept_at:
+    if scanner.last_deep_swept_at >= scanner.last_swept_at:
+        return [], None
+    # Stretching widens the next window, so the saving is sublinear: the fixed events padding gets
+    # amortized over more window rather than paid per pass.
+    factor = deep_sweep_throttle_factor(deep_spend_bytes_per_day(scanner.deep_read_bytes_by_hour, now))
+    interval = DEEP_SWEEP_INTERVAL * factor
+    if now - scanner.last_deep_swept_at < interval:
         return [], None
 
     # Only the fast pass's events window can cost it candidates, so with nothing matching on events
@@ -193,13 +235,13 @@ def _deep_sweep(
         query=query,
         window_start=scanner.last_deep_swept_at,
         window_end=scanner.last_swept_at,
-        query_type="ReplayVisionDeepSweepCandidateQuery",
+        query_type=DEEP_SWEEP_CANDIDATE_QUERY_TYPE,
         sampling_rate=scanner.sampling_rate,
         sampling_salt=str(scanner.id),
         sampling_mode=scanner.sampling_mode,
         exclude_session_ids=observed_session_ids,
         candidate_limit=limit,
-        max_execution_time_seconds=DEEP_SWEEP_MAX_EXECUTION_SECONDS,
+        max_execution_time_seconds=_deep_execution_budget(factor, seconds_remaining),
         scanner_id=str(scanner.id),
     )
     # Deliberately still on the in-query blocklist. This pass holds its watermark when a batch

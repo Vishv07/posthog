@@ -39,6 +39,10 @@ from products.replay_vision.backend.temporal.activities.refresh_prompt_suggestio
     refresh_prompt_suggestion_activity,
 )
 from products.replay_vision.backend.temporal.constants import (
+    DEEP_SPEND_WINDOW_DAYS,
+    DEEP_SWEEP_INTERVAL,
+    DEEP_SWEEP_MAX_EXECUTION_SECONDS,
+    FIND_SCANNER_CANDIDATES_TIMEOUT,
     MAX_IN_FLIGHT_APPLIES_PER_SCANNER,
     MAX_IN_FLIGHT_APPLIES_PER_TEAM,
     SWEEP_READ_BUDGET_BYTES_24H,
@@ -61,6 +65,10 @@ from products.replay_vision.backend.tests.helpers import seed_scanner_spend, sna
 
 # Every scanner built below runs on this model, so its price sets what one observation draws.
 _OBSERVATION_CREDITS = observation_credits_for_model(ScannerModel.GEMINI_3_7_FLASH)
+
+
+_PAST_DEEP_INTERVAL = DEEP_SWEEP_INTERVAL + dt.timedelta(hours=1)
+_WITHIN_DEEP_INTERVAL = DEEP_SWEEP_INTERVAL - dt.timedelta(hours=1)
 
 
 def _make_scanner(**overrides) -> ReplayScanner:
@@ -221,7 +229,7 @@ class TestFindScannerCandidatesActivity:
             # Nothing swept yet, so there is no range behind the watermark to catch up on.
             ("first_sweep", None, True),
             # Nothing the narrow events window could have cost this scanner, so nothing to catch up on.
-            ("no_events_filters", dt.timedelta(hours=7), False),
+            ("no_events_filters", _PAST_DEEP_INTERVAL, False),
         ]
     )
     def test_deep_pass_skipped_but_watermark_still_advances(
@@ -251,11 +259,113 @@ class TestFindScannerCandidatesActivity:
         # Parking the watermark instead would hand a later tick an arbitrarily wide catch-up window.
         assert result.deep_swept_through == scanner.last_swept_at
 
+    @parameterized.expand(
+        [
+            # Spend on the deep pass stretches its interval, so 7h since the last pass is not yet due.
+            ("deep_spend_stretches_interval", True, False),
+            # The same spend attributed to the frequent sweep must not: reading the wrong bucket here
+            # would throttle the deep pass on the fast pass's bill, and vice versa.
+            ("fast_spend_does_not", False, True),
+        ]
+    )
+    def test_deep_interval_stretches_on_deep_spend_only(
+        self, _name: str, spend_is_deep: bool, expect_run: bool
+    ) -> None:
+        # Deep spend is priced as a daily rate over DEEP_SPEND_WINDOW_DAYS, so one bucket carries the
+        # whole window: 32 budgets here is 4 budgets a day, a factor of 4.
+        hour = dt.datetime.now(dt.UTC).replace(minute=0, second=0, microsecond=0).isoformat()
+        spend = {hour: SWEEP_READ_BUDGET_BYTES_24H * 4 * DEEP_SPEND_WINDOW_DAYS}
+        scanner = _make_scanner(
+            last_deep_swept_at=dt.datetime.now(dt.UTC) - _PAST_DEEP_INTERVAL,
+            deep_read_bytes_by_hour=spend if spend_is_deep else None,
+            fast_read_bytes_by_hour=None if spend_is_deep else spend,
+        )
+        _settle_edit_clock(scanner)
+
+        with (
+            patch(
+                "products.replay_vision.backend.temporal.activities.find_scanner_candidates.ScannerCandidateQuery"
+            ) as MockQuery,
+            patch(
+                "products.replay_vision.backend.temporal.activities.find_scanner_candidates.WindowedCandidateQuery"
+            ) as MockDeep,
+            # The frequent sweep's own throttle would otherwise skip the tick before the deep pass runs.
+            patch(
+                "products.replay_vision.backend.temporal.activities.find_scanner_candidates._throttled",
+                return_value=False,
+            ),
+        ):
+            MockQuery.return_value.run.return_value = []
+            MockQuery.return_value.matches_on_events.return_value = True
+            MockDeep.return_value.run.return_value = []
+            find_scanner_candidates_activity(
+                FindScannerCandidatesInputs(scanner_id=scanner.id, team_id=scanner.team_id)
+            )
+
+        assert MockDeep.called is expect_run
+
+    def test_deep_pass_failure_does_not_discard_the_fast_batch(self) -> None:
+        # The fast pass has already paid for its reads by this point. Letting a catch-up failure fail
+        # the activity throws those candidates away and Temporal re-runs the whole tick, reads included.
+        scanner = _make_scanner(last_deep_swept_at=dt.datetime.now(dt.UTC) - _PAST_DEEP_INTERVAL)
+        _settle_edit_clock(scanner)
+        fast = [CandidateSession(session_id="fast-1", session_end=dt.datetime(2026, 5, 1, 6, 0, tzinfo=dt.UTC))]
+
+        with (
+            patch(
+                "products.replay_vision.backend.temporal.activities.find_scanner_candidates.ScannerCandidateQuery"
+            ) as MockQuery,
+            patch(
+                "products.replay_vision.backend.temporal.activities.find_scanner_candidates.WindowedCandidateQuery"
+            ) as MockDeep,
+        ):
+            MockQuery.return_value.run.return_value = fast
+            MockQuery.return_value.matches_on_events.return_value = True
+            MockDeep.return_value.run.side_effect = Exception("clickhouse timeout")
+            result = find_scanner_candidates_activity(
+                FindScannerCandidatesInputs(scanner_id=scanner.id, team_id=scanner.team_id)
+            )
+
+        assert [c.session_id for c in result.candidates] == ["fast-1"]
+        assert result.deep_candidates == []
+        # Not advanced: the range behind the watermark still has not been walked.
+        assert result.deep_swept_through is None
+
+    def test_deep_query_budget_scales_with_the_stretch(self) -> None:
+        # A stretched pass scans proportionally more, so a fixed budget would time out exactly the
+        # scanners the stretch exists for, and a timeout costs a whole retried tick.
+        hour = dt.datetime.now(dt.UTC).replace(minute=0, second=0, microsecond=0).isoformat()
+        scanner = _make_scanner(
+            last_deep_swept_at=dt.datetime.now(dt.UTC) - dt.timedelta(days=30),
+            deep_read_bytes_by_hour={hour: SWEEP_READ_BUDGET_BYTES_24H * 4 * DEEP_SPEND_WINDOW_DAYS},
+        )
+        _settle_edit_clock(scanner)
+
+        with (
+            patch(
+                "products.replay_vision.backend.temporal.activities.find_scanner_candidates.ScannerCandidateQuery"
+            ) as MockQuery,
+            patch(
+                "products.replay_vision.backend.temporal.activities.find_scanner_candidates.WindowedCandidateQuery"
+            ) as MockDeep,
+        ):
+            MockQuery.return_value.run.return_value = []
+            MockQuery.return_value.matches_on_events.return_value = True
+            MockDeep.return_value.run.return_value = []
+            find_scanner_candidates_activity(
+                FindScannerCandidatesInputs(scanner_id=scanner.id, team_id=scanner.team_id)
+            )
+
+        budget = MockDeep.call_args.kwargs["max_execution_time_seconds"]
+        assert budget > DEEP_SWEEP_MAX_EXECUTION_SECONDS
+        # Still inside what the activity can spare, or the attempt dies after the fast pass paid.
+        assert budget <= FIND_SCANNER_CANDIDATES_TIMEOUT.total_seconds() - DEEP_SWEEP_MAX_EXECUTION_SECONDS
+
     def test_deep_pass_runs_once_more_after_the_query_loses_its_event_filters(self) -> None:
         # The range behind the watermark was swept under the old filters, with the fast pass's narrow
         # events window costing it candidates. Skipping on the new filters would strand them there:
         # the fast pass never looks back, so this is the only pass that revisits that range.
-        scanner = _make_scanner(last_deep_swept_at=dt.datetime.now(dt.UTC) - dt.timedelta(hours=7))
+        scanner = _make_scanner(last_deep_swept_at=dt.datetime.now(dt.UTC) - _PAST_DEEP_INTERVAL)
         assert scanner.last_deep_swept_at is not None and scanner.updated_at > scanner.last_deep_swept_at
 
         with (
@@ -276,7 +386,7 @@ class TestFindScannerCandidatesActivity:
         MockDeep.assert_called_once()
 
     def test_stale_deep_watermark_runs_full_width_catchup(self) -> None:
-        deep_watermark = dt.datetime.now(dt.UTC) - dt.timedelta(hours=7)
+        deep_watermark = dt.datetime.now(dt.UTC) - _PAST_DEEP_INTERVAL
         scanner = _make_scanner(last_deep_swept_at=deep_watermark)
         straggler = CandidateSession(
             session_id="deep-sess", session_end=dt.datetime(2026, 5, 1, 6, 0, 0, tzinfo=dt.UTC)
@@ -306,8 +416,8 @@ class TestFindScannerCandidatesActivity:
 
     @parameterized.expand(
         [
-            ("fresh_watermark_skips", dt.timedelta(hours=1), False),
-            ("stale_watermark_runs", dt.timedelta(hours=7), True),
+            ("fresh_watermark_skips", _WITHIN_DEEP_INTERVAL, False),
+            ("stale_watermark_runs", _PAST_DEEP_INTERVAL, True),
         ]
     )
     def test_deep_pass_gated_on_watermark_age(self, _name: str, watermark_age: dt.timedelta, expect_run: bool) -> None:
@@ -372,7 +482,7 @@ class TestFindScannerCandidatesActivity:
     def test_deep_pass_limited_to_headroom_left_by_fast_pass(
         self, _name: str, fast_count: int, limit: int, expected_deep_limit: int | None
     ) -> None:
-        scanner = _make_scanner(last_deep_swept_at=dt.datetime.now(dt.UTC) - dt.timedelta(hours=7))
+        scanner = _make_scanner(last_deep_swept_at=dt.datetime.now(dt.UTC) - _PAST_DEEP_INTERVAL)
         fast = [
             CandidateSession(session_id=f"sess-{i}", session_end=dt.datetime(2026, 5, 1, 10, 0, i, tzinfo=dt.UTC))
             for i in range(fast_count)
@@ -401,7 +511,7 @@ class TestFindScannerCandidatesActivity:
     def test_deep_pass_excludes_sessions_with_terminal_observations(self) -> None:
         # The $recording_observed event only lands on success, so excluding on it would hand these
         # sessions back on every tick and the walk would never move past them.
-        scanner = _make_scanner(last_deep_swept_at=dt.datetime.now(dt.UTC) - dt.timedelta(hours=7))
+        scanner = _make_scanner(last_deep_swept_at=dt.datetime.now(dt.UTC) - _PAST_DEEP_INTERVAL)
         for session_id, status in (("failed-sess", ObservationStatus.FAILED), ("ok-sess", ObservationStatus.SUCCEEDED)):
             ReplayObservation.objects.create(
                 scanner=scanner,
@@ -434,7 +544,7 @@ class TestFindScannerCandidatesActivity:
         assert "exclude_observed_by_scanner" not in MockDeep.call_args.kwargs
 
     def test_truncated_deep_batch_holds_watermark(self) -> None:
-        scanner = _make_scanner(last_deep_swept_at=dt.datetime.now(dt.UTC) - dt.timedelta(hours=7))
+        scanner = _make_scanner(last_deep_swept_at=dt.datetime.now(dt.UTC) - _PAST_DEEP_INTERVAL)
         stragglers = [
             CandidateSession(session_id=f"deep-{i}", session_end=dt.datetime(2026, 5, 1, 6, 0, i, tzinfo=dt.UTC))
             for i in range(3)
@@ -473,7 +583,7 @@ class TestFindScannerCandidatesActivity:
     ) -> None:
         hour = dt.datetime.now(dt.UTC).replace(minute=0, second=0, microsecond=0)
         scanner = _make_scanner(
-            sweep_read_bytes_by_hour={hour.isoformat(): 100 * SWEEP_READ_BUDGET_BYTES_24H},
+            fast_read_bytes_by_hour={hour.isoformat(): 100 * SWEEP_READ_BUDGET_BYTES_24H},
             sweep_throttle_factor_override=override,
         )
         if extra_watermark_lag:

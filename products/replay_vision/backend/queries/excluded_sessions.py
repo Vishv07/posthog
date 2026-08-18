@@ -27,6 +27,7 @@ from opentelemetry import trace
 from posthog.models import Team
 
 from products.replay_vision.backend.queries.scanner_candidate_query import (
+    EXCLUDED_SESSIONS_QUERY_TYPE,
     CandidateSession,
     ScannerCandidateQuery,
     WindowedCandidateQuery,
@@ -82,7 +83,7 @@ def excluded_session_ids(
             rows = execute_candidate_query(
                 exclusion,
                 team=team,
-                query_type="ReplayVisionExcludedSessionsQuery",
+                query_type=EXCLUDED_SESSIONS_QUERY_TYPE,
                 max_execution_time_seconds=max(1, int(deadline - time.monotonic())),
                 # Metered against the scanner's read budget like its candidate query.
                 scanner_id=scanner_id,
