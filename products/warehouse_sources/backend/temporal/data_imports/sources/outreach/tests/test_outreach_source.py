@@ -60,7 +60,9 @@ class TestOutreachSource:
         assert config.label == "Outreach"
         assert config.category == DataWarehouseSourceCategory.SALES
         assert config.releaseStatus == ReleaseStatus.ALPHA
-        assert not config.unreleasedSource
+        # Held back from the catalog until a PostHog-owned Outreach credential exists; a pasted
+        # refresh token cannot survive Outreach's rotation.
+        assert config.unreleasedSource is True
         assert config.iconPath == "/static/services/outreach.png"
 
     @pytest.mark.parametrize(

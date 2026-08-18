@@ -65,10 +65,17 @@ class OutreachSource(ResumableSource[OutreachSourceConfig, OutreachResumeConfig]
             label="Outreach",
             caption="""Connect your Outreach account to pull prospects, accounts, sequences, and engagement data into the PostHog Data warehouse.
 
-Outreach's API is OAuth-only. Create an OAuth application for your Outreach account, then generate a refresh token for it. Enter the application's client ID and client secret alongside the refresh token below. The application needs read access to Prospects, Accounts, Sequences, Sequence states, Mailings, Calls, Users, and Stages.""",
+Outreach's API is OAuth-only, and its refresh tokens expire after 14 days. This source is not ready to connect yet, because it needs a PostHog-registered Outreach application to hold a credential that renews itself.""",
             iconPath="/static/services/outreach.png",
             docsUrl="https://posthog.com/docs/cdp/sources/outreach",
             releaseStatus=ReleaseStatus.ALPHA,
+            # Outreach issues a new refresh token on every token exchange, invalidates the previous
+            # one, and expires them after 14 days. A refresh token pasted into a form field can't be
+            # written back, and each schema syncs in its own workflow, so parallel syncs would race
+            # to spend the same token. Both need a credential PostHog owns and can update: either a
+            # registered OAuth app or Outreach's server-to-server app tokens. Keep the source out of
+            # the catalog until one of those is in place.
+            unreleasedSource=True,
             fields=cast(
                 list[FieldType],
                 [
