@@ -78,6 +78,13 @@ vi.mock(
 vi.mock("@posthog/ui/features/sessions/components/StopCloudRunButton", () => ({
   StopCloudRunButton: () => <div>stop cloud run</div>,
 }));
+// Needs a QueryClient (org members, current user); covered by its own tests.
+vi.mock(
+  "@posthog/ui/features/task-detail/components/HandoffTaskButton",
+  () => ({
+    HandoffTaskButton: () => null,
+  }),
+);
 vi.mock("@posthog/ui/features/diff-stats/DiffStatsBadge", () => ({
   DiffStatsBadge: () => null,
 }));

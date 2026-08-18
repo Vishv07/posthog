@@ -2422,6 +2422,27 @@ export class PostHogAPIClient {
     return data.pinned;
   }
 
+  // Hand a task off to a colleague: they become its owner and take over driving
+  // it. Not in the generated OpenAPI client yet, so raw fetch like the pin
+  // endpoint above.
+  async handoffTask(taskId: string, userId: number): Promise<Task> {
+    const teamId = await this.getTeamId();
+    const urlPath = `/api/projects/${teamId}/tasks/${taskId}/handoff/`;
+    const response = await this.api.fetcher.fetch({
+      method: "post",
+      url: new URL(`${this.api.baseUrl}${urlPath}`),
+      path: urlPath,
+      overrides: { body: JSON.stringify({ user: userId }) },
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to hand off task: ${response.statusText}`);
+    }
+    const data = (await response.json()) as Parameters<
+      typeof normalizeTaskResponse
+    >[0];
+    return normalizeTaskResponse(data, { teamId });
+  }
+
   async listTaskAutomations(options?: {
     limit?: number;
     offset?: number;

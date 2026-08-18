@@ -16,6 +16,7 @@ import {
 import { useService } from "@posthog/di/react";
 import type { Task } from "@posthog/shared/domain-types";
 import { channelFeedQueryRoot } from "@posthog/ui/features/canvas/hooks/useChannelFeed";
+import { TASK_CHANNELS_QUERY_KEY } from "@posthog/ui/features/canvas/hooks/useTaskChannels";
 import { taskKeys } from "@posthog/ui/features/tasks/taskKeys";
 import { useAuthenticatedMutation } from "@posthog/ui/hooks/useAuthenticatedMutation";
 import { useQueryClient } from "@tanstack/react-query";
@@ -44,6 +45,32 @@ export function useUpdateTask() {
         queryClient.invalidateQueries({ queryKey: taskKeys.lists() });
         queryClient.invalidateQueries({ queryKey: taskKeys.detail(taskId) });
         queryClient.invalidateQueries({ queryKey: taskKeys.allSummaries() });
+      },
+    },
+  );
+}
+
+/**
+ * Hand a task off to a colleague: the backend makes them the owner, moves a
+ * private-space task into the recipient's private space, and announces the
+ * handoff in the task's thread. The next refresh may drop the task from the
+ * requester's own lists, so nothing here is seeded optimistically.
+ */
+export function useHandoffTask() {
+  const queryClient = useQueryClient();
+
+  return useAuthenticatedMutation(
+    (client, { taskId, userId }: { taskId: string; userId: number }) =>
+      client.handoffTask(taskId, userId),
+    {
+      onSuccess: (_, { taskId }) => {
+        queryClient.invalidateQueries({ queryKey: taskKeys.lists() });
+        queryClient.invalidateQueries({ queryKey: taskKeys.detail(taskId) });
+        queryClient.invalidateQueries({ queryKey: taskKeys.allSummaries() });
+        queryClient.invalidateQueries({ queryKey: channelFeedQueryRoot });
+        // A recipient's private channel may be created by the handoff, and the
+        // task's channel can change (private space moves to the recipient's).
+        queryClient.invalidateQueries({ queryKey: TASK_CHANNELS_QUERY_KEY });
       },
     },
   );

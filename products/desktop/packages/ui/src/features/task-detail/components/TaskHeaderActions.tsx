@@ -19,6 +19,7 @@ import { StopCloudRunButton } from "@posthog/ui/features/sessions/components/Sto
 import { useHandoffDialogStore } from "@posthog/ui/features/sessions/handoffDialogStore";
 import { useSessionCallbacks } from "@posthog/ui/features/sessions/hooks/useSessionCallbacks";
 import { useSessionForTask } from "@posthog/ui/features/sessions/useSession";
+import { HandoffTaskButton } from "@posthog/ui/features/task-detail/components/HandoffTaskButton";
 import {
   useIsCloudTask,
   useWorkspace,
@@ -160,6 +161,7 @@ export function TaskHeaderActions({ task }: { task: Task }) {
       )}
       {showDiffBadge && <TaskDiffStatsBadge task={task} />}
 
+      <HandoffTaskButton task={task} />
       {workspaceLoaded && (
         <>
           {isCloudTask ? (
