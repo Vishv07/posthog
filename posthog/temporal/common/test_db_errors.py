@@ -18,6 +18,7 @@ class _WithSqlstate(Exception):
         (OperationalError("query_wait_timeout"), True),
         (OperationalError("server closed the connection unexpectedly"), True),
         (InterfaceError("connection reset by peer"), True),
+        (OperationalError("server conn crashed?"), True),
         (OperationalError("the database system is starting up"), True),
         (OperationalError("the database system is shutting down"), True),
         (
@@ -37,6 +38,7 @@ def test_is_transient_db_error_by_message(error: BaseException, expected: bool) 
     [
         ("57P03", True),  # cannot_connect_now (server starting up/shutting down)
         ("3D000", False),  # invalid_catalog_name — persistent misconfiguration
+        ("08P01", False),  # protocol_violation, transient only for pgbouncer's own message
     ],
 )
 def test_is_transient_db_error_by_sqlstate(sqlstate: str, expected: bool) -> None:
