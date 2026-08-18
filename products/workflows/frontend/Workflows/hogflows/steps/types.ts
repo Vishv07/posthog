@@ -179,6 +179,15 @@ export const HogFlowTriggerSchema = z.discriminatedUnion('type', [
         }),
         key_property: z.string().optional(),
     }),
+    z.object({
+        type: z.literal('data-warehouse-view'),
+        // The materialized view's own name, which is also its HogQL name
+        table_name: z.string(),
+        filters: z.object({
+            properties: z.array(z.any()).optional(),
+        }),
+        key_property: z.string().optional(),
+    }),
 ])
 
 /** Trigger types that use HogFlowSchedule for recurring execution */

@@ -110,6 +110,9 @@ export const NEW_WORKFLOW: HogFlow = {
 
 // Step types that depend on person data and so cannot run for person-less (row-scoped)
 // data-warehouse-table triggers. Module-scoped to avoid reallocating on every selector recompute.
+// Warehouse triggers run once per row, with no person attached.
+export const ROW_SCOPED_TRIGGER_TYPES = new Set<string>(['data-warehouse-table', 'data-warehouse-view'])
+
 export const PERSON_DEPENDENT_ACTION_TYPES = new Set(['wait_until_condition', 'random_cohort_branch'])
 
 function getTemplatingError(value: string, templating?: 'liquid' | 'hog'): string | undefined {
@@ -3426,7 +3429,8 @@ export const workflowLogic = kea<workflowLogicType>([
         // for the authoritative enforcement).
         isRowScopedTrigger: [
             (s) => [s.triggerAction],
-            (triggerAction: TriggerAction | null): boolean => triggerAction?.config?.type === 'data-warehouse-table',
+            (triggerAction: TriggerAction | null): boolean =>
+                ROW_SCOPED_TRIGGER_TYPES.has(triggerAction?.config?.type ?? ''),
         ],
 
         workflowSanitized: [
