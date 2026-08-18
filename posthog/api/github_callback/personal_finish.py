@@ -59,6 +59,14 @@ def finish_personal(request: HttpRequest) -> FinishResult:
     flow = authorize_state.flow
     installation_ids: list[str] = []
 
+    if request.GET.get("setup_action") == "request" and not request.GET.get("installation_id"):
+        # Not an org owner: GitHub only requested approval instead of installing. It still
+        # sends an OAuth `code` when the App asks for user authorization on install, so this
+        # has to be checked before the code branches. Same code the team flow surfaces, so
+        # the desktop treats both paths as one pending state. No server-side event: the
+        # personal authorize state carries no team_id to attribute it to.
+        return _error("github_install_pending")
+
     if not code:
         # GitHub omits the OAuth `code` when the App is already installed on the
         # account: the install URL returns a setup update (installation_id, no code)
@@ -76,11 +84,6 @@ def finish_personal(request: HttpRequest) -> FinishResult:
                 ),
             )
             return FinishResult(redirect_kind="oauth_url", oauth_url=github_oauth_authorize_url(discover_state))
-        if request.GET.get("setup_action") == "request":
-            # Not an org owner: GitHub only requested approval instead of installing. Same code
-            # the team flow surfaces, so the desktop treats both paths as one pending state. No
-            # server-side event: the personal authorize state carries no team_id to attribute it to.
-            return _error("github_install_pending")
         return _error("missing_params")
 
     match flow:
