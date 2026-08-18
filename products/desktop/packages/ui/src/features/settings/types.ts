@@ -7,6 +7,7 @@ export type SettingsCategory =
   | "environments"
   | "cloud-environments"
   | "agents"
+  | "task-agent-defaults"
   | "skills"
   | "mcp-servers"
   | "personalization"
@@ -30,6 +31,7 @@ export const SETTINGS_CATEGORIES: readonly SettingsCategory[] = [
   "environments",
   "cloud-environments",
   "agents",
+  "task-agent-defaults",
   "skills",
   "mcp-servers",
   "personalization",
@@ -61,6 +63,7 @@ export const SETTINGS_PAGE_LABELS: Record<SettingsCategory, string> = {
   environments: "Environments",
   "cloud-environments": "Environments",
   agents: "Agents",
+  "task-agent-defaults": "Task agents",
   skills: "Skills",
   "mcp-servers": "MCP servers",
   personalization: "Personalization",
