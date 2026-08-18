@@ -87,6 +87,10 @@ GOOGLE_ADS_MAX_DRAIN_SECONDS = 10 * 60
 # serves older rows than this, so raising it costs first-sync catch-up time rather than correctness.
 GOOGLE_ADS_INITIAL_BACKFILL_DAYS = 2 * 365
 
+# Lower bound for the "where does this account's data begin" probe. Google serves the query with a
+# date this old and returns nothing before an account existed, so it needs no per-account tuning.
+_GOOGLE_ADS_EARLIEST_QUERYABLE_DATE = "1970-01-01"
+
 # The Google Ads SDK hardcodes `grpc.max_receive_message_length` to 64 MiB. A single
 # `GoogleAdsService.Search` page can carry up to 10,000 rows, and wide resources routinely
 # serialize past 64 MiB — when that happens the gRPC client aborts the call with a
@@ -490,6 +494,35 @@ def get_schemas(config: GoogleAdsSourceConfigUnion, team_id: int, api_version: s
     return table_schemas
 
 
+def _earliest_date_with_data(
+    service: "GoogleAdsSearchService",
+    customer_id: str | None,
+    table: "GoogleAdsTable",
+    incremental_field: str,
+) -> dt.date | None:
+    """Return the first date this resource holds rows for, or None when it holds none.
+
+    One request: Google sorts and truncates server-side, so the cost doesn't grow with the range or
+    with how much the account holds. That makes it cheap enough to replace guessing how far back to
+    reach. Selects only the date, since the rows themselves are fetched by the windowed drain.
+    """
+    query = (
+        f"SELECT {incremental_field} FROM {table.name} "
+        f"WHERE {incremental_field} >= '{_GOOGLE_ADS_EARLIEST_QUERYABLE_DATE}' "
+        f"AND {incremental_field} < '{(dt.date.today() + dt.timedelta(days=1)).isoformat()}'"
+    )
+    if table.extra_where:
+        query += f" AND {table.extra_where}"
+    query += f" ORDER BY {incremental_field} ASC LIMIT 1"
+
+    # Through the wrapper, so a manager account's missing login-customer-id header recovers here the
+    # same way it does for the drain's own queries.
+    for row in _search_with_transient_retry(service, {"customer_id": customer_id, "query": query}):
+        return dt.date.fromisoformat(_traverse_attributes(row, *incremental_field.split(".")))
+
+    return None
+
+
 def _incremental_value_as_date(value: dt.date | dt.datetime | str) -> dt.date:
     """Coerce a stored incremental cursor value to a plain date for window arithmetic.
 
@@ -513,8 +546,8 @@ def google_ads_source(
     db_incremental_field_last_value: typing.Any = None,
     incremental_field: str | None = None,
     incremental_field_type: IncrementalFieldType | None = None,
-    db_backfill_floor_value: typing.Any = None,
     db_incremental_field_lookback_seconds: int | None = None,
+    is_reset: bool = False,
 ) -> SourceResponse:
     """A data warehouse Google Ads source.
 
@@ -597,13 +630,15 @@ def google_ads_source(
                 # The cursor arrives shifted back by the schema's lookback, so the windows before
                 # `charge_from` re-read rows the table already has. They don't count as progress.
                 charge_from = start + dt.timedelta(seconds=db_incremental_field_lookback_seconds or 0)
-            elif db_backfill_floor_value is not None:
-                # Re-import of a table that held history: the cursor is gone but the range it
-                # covered is known, so walk from there rather than from the bound below.
-                start = _incremental_value_as_date(db_backfill_floor_value)
-                charge_from = start
             else:
-                start = dt.date.today() - dt.timedelta(days=GOOGLE_ADS_INITIAL_BACKFILL_DAYS)
+                # A reset wipes the table and clears the cursor, so this run looks like a first sync
+                # and the bound below would drop everything the table held that predates it. Ask the
+                # account where its data begins instead, which costs one request and reproduces the
+                # whole range. A genuine first sync keeps the bound: it has nothing to lose, and the
+                # rows it would import are billable.
+                start = (is_reset and _earliest_date_with_data(service, customer_id, table, incremental_field)) or (
+                    dt.date.today() - dt.timedelta(days=GOOGLE_ADS_INITIAL_BACKFILL_DAYS)
+                )
                 charge_from = start
             # Exclusive upper bound of today+1 keeps today in range, matching the open-ended scan.
             end = dt.date.today() + dt.timedelta(days=1)
