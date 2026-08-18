@@ -19,8 +19,14 @@ from posthog.temporal.oauth import PosthogMcpScopes
 from products.tasks.backend.constants import DEV_STACK_IMAGE_NAME, SNAPSHOT_KIND_FILESYSTEM
 from products.tasks.backend.error_telemetry import truncate_error_message
 from products.tasks.backend.logic.services.sandbox import is_public_sandbox_repo
+from products.tasks.backend.temporal.babysit_pr.prompts import build_wake_prompt
+from products.tasks.backend.temporal.babysit_pr.snapshot import AttentionSet, BabysitJournal, PRSnapshot
 from products.tasks.backend.temporal.create_snapshot.workflow import CreateSnapshotForRepositoryInput
 from products.tasks.backend.temporal.patches import ci_follow_up_actionable_gate
+from products.tasks.backend.temporal.process_task.activities.get_pr_babysit_snapshot import (
+    GetPrBabysitSnapshotInput,
+    get_pr_babysit_snapshot,
+)
 from products.tasks.backend.temporal.process_task.activities.get_pr_context import (
     GetPrContextInput,
     get_pr_context,
@@ -153,6 +159,7 @@ class ResumedSandboxState:
     last_active_time: Optional[str]  # ISO8601, or None if never active
     # Defaulted so continue_as_new payloads from pre-rollout runs deserialize.
     pr_unresolved_threads: int = 0
+    babysit_journal: BabysitJournal = field(default_factory=BabysitJournal)
     accepted_message_ids: list[str] = field(default_factory=list)
     # ISO8601 start of the whole continue_as_new chain, so the wall-clock cap is not
     # reset by a continuation. None on payloads written before this field existed.
@@ -216,6 +223,13 @@ class CIFollowUpDecision(StrEnum):
     FIRE = "fire"
     SKIP = "skip"
     NO_PR = "no_pr"
+    TERMINAL = "terminal"
+
+
+@dataclass(frozen=True)
+class _BabysitDispatch:
+    snapshot: PRSnapshot
+    attention: AttentionSet
 
 
 # Legacy re-exports kept while process_task is still on the worker. New
@@ -387,6 +401,8 @@ class ProcessTaskWorkflow(PostHogWorkflow):
         # Emit the "PR opened / keeping CI green" progress once, the first time we observe a PR — the
         # agent opens it mid-run and then keeps it green, so without this the UI dead-ends at "Started agent".
         self._pr_progress_emitted: bool = False
+        self._babysit_journal: BabysitJournal = BabysitJournal()
+        self._pending_babysit: Optional[_BabysitDispatch] = None
         # Decided once at workflow start; gates the placeholder skip + relay spawn.
         self._is_agent_design_enabled: bool = False
         # Deadline-based so heartbeats waking the event loop don't keep resetting the timer.
@@ -717,6 +733,8 @@ class ProcessTaskWorkflow(PostHogWorkflow):
         agent has finished working — if no PR exists at this point, one
         won't appear later.
         """
+        if self.context.pr_babysit_enabled:
+            return await self._should_run_babysit_follow_up()
         pr_context = await workflow.execute_activity(
             get_pr_context,
             GetPrContextInput(context=self.context),
@@ -729,12 +747,8 @@ class ProcessTaskWorkflow(PostHogWorkflow):
                 extra={"run_id": self.context.run_id},
             )
             return CIFollowUpDecision.NO_PR
-        # First time we observe a PR: surface "Opened pull request" + "Keeping CI green" so the UI moves
-        # past "Started agent". The url rides the "pr" step's detail; the frontend turns it into the CTA.
         if pr_context.pr_url and not self._pr_progress_emitted:
-            self._pr_progress_emitted = True
-            await self._emit_progress("pr", "completed", "Opened pull request", "setup", detail=pr_context.pr_url)
-            await self._emit_progress("ci", "in_progress", "Keeping CI green", "setup")
+            await self._emit_pr_opened_progress(pr_context.pr_url)
         if pr_context.pr_state in ("closed", "merged"):
             workflow.logger.info(
                 "PR is closed, skipping CI follow-up",
@@ -784,11 +798,85 @@ class ProcessTaskWorkflow(PostHogWorkflow):
         )
         return CIFollowUpDecision.FIRE if fire else CIFollowUpDecision.SKIP
 
+    async def _emit_pr_opened_progress(self, pr_url: str) -> None:
+        # First time we observe a PR: surface "Opened pull request" + "Keeping CI green" so the UI moves
+        # past "Started agent". The url rides the "pr" step's detail; the frontend turns it into the CTA.
+        self._pr_progress_emitted = True
+        await self._emit_progress("pr", "completed", "Opened pull request", "setup", detail=pr_url)
+        await self._emit_progress("ci", "in_progress", "Keeping CI green", "setup")
+
+    async def _should_run_babysit_follow_up(self) -> CIFollowUpDecision:
+        self._pending_babysit = None
+        snapshot = await workflow.execute_activity(
+            get_pr_babysit_snapshot,
+            GetPrBabysitSnapshotInput(context=self.context),
+            start_to_close_timeout=timedelta(minutes=5),
+            retry_policy=RetryPolicy(maximum_attempts=3),
+        )
+        if not snapshot:
+            workflow.logger.info(
+                "PR context is missing, stopping CI follow-up loop",
+                extra={"run_id": self.context.run_id},
+            )
+            return CIFollowUpDecision.NO_PR
+        if snapshot.pr_url and not self._pr_progress_emitted:
+            await self._emit_pr_opened_progress(snapshot.pr_url)
+        if snapshot.is_terminal:
+            workflow.logger.info(
+                "PR reached a terminal state, stopping CI follow-up loop",
+                extra={
+                    "run_id": self.context.run_id,
+                    "pr_url": snapshot.pr_url,
+                    "pr_state": snapshot.pr_state,
+                },
+            )
+            label = "PR merged" if snapshot.pr_state == "merged" else "PR closed"
+            await self._emit_progress("ci", "completed", label, "setup")
+            return CIFollowUpDecision.TERMINAL
+        attention = self._babysit_journal.attention(snapshot)
+        if attention.is_empty:
+            workflow.logger.info(
+                "PR has nothing needing attention, skipping CI follow-up",
+                extra={
+                    "run_id": self.context.run_id,
+                    "pr_url": snapshot.pr_url,
+                    "pr_state": snapshot.pr_state,
+                    "head_sha": snapshot.head_sha,
+                },
+            )
+            return CIFollowUpDecision.SKIP
+        self._pending_babysit = _BabysitDispatch(snapshot=snapshot, attention=attention)
+        workflow.logger.info(
+            "PR needs attention, dispatching CI follow-up",
+            extra={
+                "run_id": self.context.run_id,
+                "pr_url": snapshot.pr_url,
+                "pr_state": snapshot.pr_state,
+                "head_sha": snapshot.head_sha,
+                "failing_checks": len(attention.failing_checks),
+                "threads": len(attention.threads),
+                "comments": len(attention.comments),
+                "conflict": attention.conflict,
+            },
+        )
+        return CIFollowUpDecision.FIRE
+
     async def _dispatch_ci_follow_up(self) -> None:
         self._ci_repetitions += 1
-        ci_message = self.context.ci_prompt or DEFAULT_CI_MESSAGE
+        pending = self._pending_babysit
+        if pending is None:
+            ci_message = self.context.ci_prompt or DEFAULT_CI_MESSAGE
+        else:
+            ci_message = build_wake_prompt(
+                pending.snapshot.pr_url,
+                pending.attention,
+                extra_instructions=self.context.ci_prompt,
+            )
         self._last_active_time = workflow.now()
         await self._send_followup_to_sandbox(ci_message, [])
+        if pending is not None:
+            self._babysit_journal = self._babysit_journal.record(pending.snapshot, pending.attention)
+            self._pending_babysit = None
 
     @workflow.run
     async def run(self, input: ProcessTaskInput) -> ProcessTaskOutput:
@@ -910,7 +998,7 @@ class ProcessTaskWorkflow(PostHogWorkflow):
                             case CIFollowUpDecision.FIRE:
                                 workflow.set_current_details("🔁 Re-checking the PR's CI and nudging the agent.")
                                 await self._dispatch_ci_follow_up()
-                            case CIFollowUpDecision.NO_PR:
+                            case CIFollowUpDecision.NO_PR | CIFollowUpDecision.TERMINAL:
                                 # No PR will ever appear — stop the CI loop entirely.
                                 self._ci_repetitions = MAX_CI_REPETITIONS
                             case CIFollowUpDecision.SKIP:
@@ -1312,6 +1400,7 @@ class ProcessTaskWorkflow(PostHogWorkflow):
                 ci_repetitions=self._ci_repetitions,
                 pr_fingerprint=self._pr_fingerprint,
                 pr_unresolved_threads=self._pr_unresolved_threads,
+                babysit_journal=self._babysit_journal,
                 pr_progress_emitted=self._pr_progress_emitted,
                 first_user_message_received=self._first_user_message_received,
                 is_agent_design_enabled=self._is_agent_design_enabled,
@@ -1336,6 +1425,7 @@ class ProcessTaskWorkflow(PostHogWorkflow):
         self._ci_repetitions = resumed.ci_repetitions
         self._pr_fingerprint = resumed.pr_fingerprint
         self._pr_unresolved_threads = resumed.pr_unresolved_threads
+        self._babysit_journal = resumed.babysit_journal
         self._pr_progress_emitted = resumed.pr_progress_emitted
         self._first_user_message_received = resumed.first_user_message_received
         self._accepted_message_ids = resumed.accepted_message_ids

@@ -3181,17 +3181,21 @@ class TestGitHubIntegrationModel(BaseTest):
             github.get_access_token()
 
 
+def _create_github_integration(team) -> Integration:
+    # integration_id mirrors production (set from config on install) — the egress gate and
+    # tier store key on it; without it every call is identity-blind and skips both.
+    return Integration.objects.create(
+        team=team,
+        kind="github",
+        integration_id="INSTALL",
+        config={"installation_id": "INSTALL", "account": {"name": "PostHog"}},
+        sensitive_config={"access_token": "ACCESS_TOKEN"},
+    )
+
+
 class TestGitHubIntegrationGhApiGet(BaseTest):
     def _create_integration(self) -> Integration:
-        # integration_id mirrors production (set from config on install) — the egress gate and
-        # tier store key on it; without it every call is identity-blind and skips both.
-        return Integration.objects.create(
-            team=self.team,
-            kind="github",
-            integration_id="INSTALL",
-            config={"installation_id": "INSTALL", "account": {"name": "PostHog"}},
-            sensitive_config={"access_token": "ACCESS_TOKEN"},
-        )
+        return _create_github_integration(self.team)
 
     @patch("posthog.egress.transport.transport.requests.request")
     @patch("posthog.models.integration.GitHubIntegration.access_token_expired", return_value=False)
@@ -3302,13 +3306,7 @@ class TestGitHubIntegrationGhApiGet(BaseTest):
 
 class TestGitHubIntegrationGraphQL(BaseTest):
     def _create_integration(self) -> Integration:
-        return Integration.objects.create(
-            team=self.team,
-            kind="github",
-            integration_id="INSTALL",
-            config={"installation_id": "INSTALL", "account": {"name": "PostHog"}},
-            sensitive_config={"access_token": "ACCESS_TOKEN"},
-        )
+        return _create_github_integration(self.team)
 
     @staticmethod
     def _graphql_response(body: dict) -> MagicMock:
@@ -3376,6 +3374,154 @@ class TestGitHubIntegrationGraphQL(BaseTest):
         data = github._gh_graphql("query {}", {}, endpoint="/graphql:test")
         assert data == {"repository": {"name": "posthog"}}
         assert mock_request.call_count == 1
+
+
+BABYSIT_PR_URL = "https://github.com/acme/widgets/pull/7"
+
+
+def _babysit_thread(thread_id: str, *, is_resolved: bool = False, author: str = "reviewer", body: str = "fix this"):
+    return {
+        "id": thread_id,
+        "isResolved": is_resolved,
+        "path": "posthog/api.py",
+        "comments": {
+            "nodes": [
+                {
+                    "id": f"{thread_id}-C1",
+                    "url": f"{BABYSIT_PR_URL}#discussion_{thread_id}",
+                    "body": body,
+                    "author": {"login": author},
+                    "authorAssociation": "MEMBER",
+                }
+            ]
+        },
+    }
+
+
+def _babysit_feedback(node_id: str, *, author: str = "reviewer", body: str = "please rename"):
+    return {
+        "id": node_id,
+        "url": f"{BABYSIT_PR_URL}#issuecomment-{node_id}",
+        "body": body,
+        "author": {"login": author},
+        "authorAssociation": "MEMBER",
+    }
+
+
+class TestGitHubIntegrationPullRequestBabysitSnapshot(BaseTest):
+    def _github(self) -> GitHubIntegration:
+        return GitHubIntegration(_create_github_integration(self.team))
+
+    @staticmethod
+    def _payload(**overrides) -> dict:
+        pull_request: dict = {
+            "url": BABYSIT_PR_URL,
+            "state": "OPEN",
+            "isDraft": False,
+            "mergeable": "MERGEABLE",
+            "headRefOid": "head1",
+            "author": {"login": "posthog-bot"},
+            "reviewThreads": {"nodes": []},
+            "comments": {"nodes": []},
+            "reviews": {"nodes": []},
+            "commits": {"nodes": [{"commit": {"statusCheckRollup": None}}]},
+        }
+        pull_request.update(overrides)
+        return {"repository": {"pullRequest": pull_request}}
+
+    def test_resolved_threads_and_self_or_empty_feedback_are_dropped(self):
+        payload = self._payload(
+            reviewThreads={"nodes": [_babysit_thread("T1", is_resolved=True), _babysit_thread("T2")]},
+            comments={
+                "nodes": [
+                    _babysit_feedback("M1", author="posthog-bot"),
+                    _babysit_feedback("M2", body="   "),
+                    _babysit_feedback("M3"),
+                ]
+            },
+            reviews={"nodes": [_babysit_feedback("R1", author="posthog-bot"), _babysit_feedback("R2")]},
+        )
+
+        with patch.object(GitHubIntegration, "_gh_graphql", return_value=payload):
+            result = self._github().get_pull_request_babysit_snapshot(BABYSIT_PR_URL)
+
+        assert [thread["id"] for thread in result["unresolved_threads"]] == ["T2"]
+        assert [comment["id"] for comment in result["comments"]] == ["M3", "R2"]
+
+    @parameterized.expand(
+        [
+            ("MERGED", False, "merged"),
+            ("CLOSED", False, "closed"),
+            ("OPEN", True, "draft"),
+            ("OPEN", False, "open"),
+        ]
+    )
+    def test_pr_state_mapping(self, gql_state, is_draft, expected):
+        payload = self._payload(state=gql_state, isDraft=is_draft)
+
+        with patch.object(GitHubIntegration, "_gh_graphql", return_value=payload):
+            result = self._github().get_pull_request_babysit_snapshot(BABYSIT_PR_URL)
+
+        assert result["state"] == expected
+
+    @parameterized.expand(
+        [
+            ("CONFLICTING", True),
+            ("MERGEABLE", False),
+            ("UNKNOWN", False),
+        ]
+    )
+    def test_only_a_conflicting_merge_state_flags_a_conflict(self, gql_mergeable, expected):
+        payload = self._payload(mergeable=gql_mergeable)
+
+        with patch.object(GitHubIntegration, "_gh_graphql", return_value=payload):
+            result = self._github().get_pull_request_babysit_snapshot(BABYSIT_PR_URL)
+
+        assert result["has_conflict"] is expected
+
+    def test_extracts_only_failing_checks_with_workflow_scoped_keys(self):
+        rollup = {
+            "contexts": {
+                "nodes": [
+                    {
+                        "__typename": "CheckRun",
+                        "name": "backend",
+                        "conclusion": "FAILURE",
+                        "detailsUrl": "https://ci.example.com/1",
+                        "checkSuite": {"workflowRun": {"workflow": {"name": "CI"}}},
+                    },
+                    {"__typename": "CheckRun", "name": "frontend", "conclusion": "SUCCESS", "checkSuite": None},
+                    {"__typename": "CheckRun", "name": "flaky", "conclusion": "TIMED_OUT", "checkSuite": None},
+                    {
+                        "__typename": "StatusContext",
+                        "context": "vercel",
+                        "state": "ERROR",
+                        "targetUrl": "https://vercel.example.com/1",
+                    },
+                    {"__typename": "StatusContext", "context": "netlify", "state": "SUCCESS"},
+                ]
+            },
+        }
+        payload = self._payload(commits={"nodes": [{"commit": {"statusCheckRollup": rollup}}]})
+
+        with patch.object(GitHubIntegration, "_gh_graphql", return_value=payload):
+            result = self._github().get_pull_request_babysit_snapshot(BABYSIT_PR_URL)
+
+        assert [check["key"] for check in result["failing_checks"]] == ["CI/backend", "flaky", "vercel"]
+        assert result["failing_checks"][0]["details_url"] == "https://ci.example.com/1"
+
+    def test_invalid_pull_request_url_is_reported_as_failure_without_calling_github(self):
+        with patch.object(GitHubIntegration, "_gh_graphql") as mock_graphql:
+            result = self._github().get_pull_request_babysit_snapshot("https://example.com/not/a/pull-request")
+
+        assert result["success"] is False
+        mock_graphql.assert_not_called()
+
+    def test_missing_pull_request_is_reported_as_failure(self):
+        with patch.object(GitHubIntegration, "_gh_graphql", return_value={"repository": {"pullRequest": None}}):
+            result = self._github().get_pull_request_babysit_snapshot(BABYSIT_PR_URL)
+
+        assert result["success"] is False
 
 
 class TestDatabricksIntegrationModel(BaseTest):
