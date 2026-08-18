@@ -34,6 +34,7 @@ from posthog.cdp.internal_events import (
 from posthog.cdp.services.icons import CDPIconsService
 from posthog.cdp.site_functions import get_transpiled_function
 from posthog.cdp.validation import (
+    DATA_WAREHOUSE_SOURCES,
     HogFunctionFiltersSerializer,
     InputsSchemaItemSerializer,
     InputsSerializer,
@@ -484,9 +485,18 @@ class HogFunctionSerializer(HogFunctionMinimalSerializer):
             to_bool(data["enabled"]) if data.get("enabled") is not None else (instance.enabled if instance else False)
         )
         self.context["function_will_be_enabled"] = False if deleted else enabled
-        # Warehouse-table sources deliver the synced row under event.properties, so input templates
-        # may use the `{record.x}` alias — flag it so the inputs serializer rewrites it on compile.
-        self.context["is_dwh_source"] = data["filters"].get("source") == "data-warehouse-table"
+        # Warehouse sources deliver the row under event.properties, so input templates may use the
+        # `{record.x}` alias — flag it so the inputs serializer rewrites it on compile.
+        self.context["is_dwh_source"] = data["filters"].get("source") in DATA_WAREHOUSE_SOURCES
+        # Materialized views are a newer source than warehouse tables, so nothing was saved before
+        # the consumer matched on the selected table. That lets us require a selection here, where
+        # an empty list still has to mean "every table" for the older source.
+        if (
+            data["filters"].get("source") == "data-warehouse-view"
+            and self.context["function_will_be_enabled"]
+            and not data["filters"].get("data_warehouse")
+        ):
+            raise serializers.ValidationError({"filters": "Select the materialized view to trigger on."})
         self.context["encrypted_inputs"] = instance.encrypted_inputs if instance else {}
 
         template = None

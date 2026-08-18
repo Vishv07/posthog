@@ -13,6 +13,7 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from posthog.exceptions_capture import capture_exception
 from posthog.temporal.common.base import PostHogWorkflow
 from posthog.temporal.data_modeling.activities import (
+    ClearCDPStagingInputs,
     CreateDataModelingJobInputs,
     DuckgresShadowInputs,
     DuckgresShadowResult,
@@ -27,6 +28,7 @@ from posthog.temporal.data_modeling.activities import (
     SucceedMaterializationInputs,
     SucceedMaterializationResult,
     check_duckgres_shadow_enabled_activity,
+    clear_cdp_staging_activity,
     create_data_modeling_job_activity,
     fail_materialization_activity,
     materialize_view_activity,
@@ -53,6 +55,7 @@ from posthog.temporal.data_modeling.metrics import (
     get_node_total_storage_mib_metric,
 )
 from posthog.temporal.data_modeling.workflows.enrich_view_semantics import EnrichViewSemanticsWorkflow
+from posthog.temporal.utils import CDPProducerWorkflowInputs
 
 from products.data_modeling.backend.facade.models import DataModelingJobEngine
 from products.data_quality.backend.facade.contracts import (
@@ -68,6 +71,10 @@ from products.data_quality.backend.facade.enums import SuiteRunTrigger
 # Covers every command the data quality feature adds here: the stage/audit/publish trio and the
 # warn-mode suite child.
 QUALITY_AUDIT_PATCH = "data-quality-audit-2026-08"
+
+# Covers the CDP producer child and the staging-cleanup activity. Both are new commands, so a
+# history recorded before this deploy has to keep taking the branch that issues neither.
+CDP_VIEW_TRIGGER_PATCH = "cdp-data-warehouse-view-trigger-2026-08"
 
 # these indicate problems with the query or data, not transient issues
 NON_RETRYABLE_ERRORS = [
@@ -224,6 +231,7 @@ class MaterializeViewWorkflow(PostHogWorkflow):
                     maximum_attempts=3,
                 ),
             )
+            materialize_result: MaterializeViewResult | None = None
             try:
                 materialize_result = await temporalio.workflow.execute_activity(
                     materialize_view_activity,
@@ -292,6 +300,8 @@ class MaterializeViewWorkflow(PostHogWorkflow):
                             retry_policy=temporalio.common.RetryPolicy(maximum_attempts=3),
                         )
                         get_node_finished_metric("quality_blocked").add(1)
+                        if temporalio.workflow.patched(CDP_VIEW_TRIGGER_PATCH):
+                            await self._discard_staged_cdp_rows(inputs, job_id, materialize_result)
                         end_time = temporalio.workflow.now()
                         blocked_duration_seconds = (end_time - start_time).total_seconds()
                         if duckgres_shadow_handle is not None:
@@ -353,6 +363,9 @@ class MaterializeViewWorkflow(PostHogWorkflow):
                 # None for in-flight runs on the pre-deploy activity version — treat that as "not needed".
                 await self._maybe_enrich_view_semantics(inputs, succeed_result)
 
+                if temporalio.workflow.patched(CDP_VIEW_TRIGGER_PATCH):
+                    await self._maybe_produce_cdp_rows(inputs, job_id, materialize_result)
+
                 quality_audited = staged_verdict is not None
                 if quality_audit == QUALITY_AUDIT_WARN:
                     quality_audited = await self._start_suite_on_published_data(inputs, job_id, materialize_result)
@@ -407,6 +420,10 @@ class MaterializeViewWorkflow(PostHogWorkflow):
                     f"MaterializeViewWorkflow failed: {error_message}",
                     extra=inputs.properties_to_log,
                 )
+                # A failure after the activity returned (publish, succeed) leaves that run's staged
+                # rows behind. The activity cleans up after its own failures itself.
+                if materialize_result is not None and temporalio.workflow.patched(CDP_VIEW_TRIGGER_PATCH):
+                    await self._discard_staged_cdp_rows(inputs, job_id, materialize_result)
                 try:
                     await temporalio.workflow.execute_activity(
                         fail_materialization_activity,
@@ -545,6 +562,83 @@ class MaterializeViewWorkflow(PostHogWorkflow):
             extra=inputs.properties_to_log,
         )
         return QUALITY_AUDIT_SKIP
+
+    async def _maybe_produce_cdp_rows(
+        self,
+        inputs: MaterializeViewWorkflowInputs,
+        job_id: str,
+        materialize_result: MaterializeViewResult,
+    ) -> None:
+        """Hand this run's rows to the CDP producer so subscribed destinations and workflows run.
+
+        Started only after the queryable publish, so a destination that queries the view back sees
+        the rows it was told about. Best effort and fully isolated: ABANDON so it never blocks this
+        workflow, and every error is swallowed — a trigger that misses a run must not fail the
+        materialization behind it.
+        """
+        if not materialize_result.should_trigger_cdp_producer:
+            return
+
+        try:
+            await temporalio.workflow.start_child_workflow(
+                workflow="dwh-cdp-producer-job",
+                arg=dataclasses.asdict(
+                    CDPProducerWorkflowInputs(
+                        team_id=inputs.team_id,
+                        job_id=job_id,
+                        saved_query_id=materialize_result.saved_query_id,
+                    )
+                ),
+                id=f"dwh-cdp-producer-job-{job_id}",
+                task_queue=str(settings.DATA_WAREHOUSE_CDP_PRODUCER_TASK_QUEUE),
+                parent_close_policy=temporalio.workflow.ParentClosePolicy.ABANDON,
+                retry_policy=temporalio.common.RetryPolicy(
+                    maximum_attempts=3,
+                    non_retryable_error_types=["NondeterminismError"],
+                ),
+            )
+        except WorkflowAlreadyStartedError:
+            temporalio.workflow.logger.info(
+                "CDP producer job already running, skipping",
+                extra={"job_id": job_id},
+            )
+        except Exception as e:
+            capture_exception(e)
+            temporalio.workflow.logger.warning(
+                "Failed to start the CDP producer job",
+                extra={"job_id": job_id, "error": str(e)},
+            )
+
+    async def _discard_staged_cdp_rows(
+        self,
+        inputs: MaterializeViewWorkflowInputs,
+        job_id: str,
+        materialize_result: MaterializeViewResult,
+    ) -> None:
+        """Drop rows staged by a run that then never published.
+
+        The staging prefix is keyed on the job, so no later run's own clear will ever reach it.
+        """
+        if not materialize_result.should_trigger_cdp_producer:
+            return
+
+        try:
+            await temporalio.workflow.execute_activity(
+                clear_cdp_staging_activity,
+                ClearCDPStagingInputs(
+                    team_id=inputs.team_id,
+                    saved_query_id=materialize_result.saved_query_id,
+                    job_id=job_id,
+                ),
+                start_to_close_timeout=dt.timedelta(minutes=5),
+                retry_policy=temporalio.common.RetryPolicy(maximum_attempts=3),
+            )
+        except Exception as e:
+            capture_exception(e)
+            temporalio.workflow.logger.warning(
+                "Failed to clear staged CDP rows",
+                extra={"job_id": job_id, "error": str(e)},
+            )
 
     async def _maybe_enrich_view_semantics(
         self,
