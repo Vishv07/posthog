@@ -510,6 +510,8 @@
          "ee_accesscontrol"."created_by_id",
          "ee_accesscontrol"."created_at",
          "ee_accesscontrol"."updated_at",
+         "ee_accesscontrol"."managed_by",
+         "ee_accesscontrol"."managed_at",
          "posthog_team"."organization_id" AS "_team_organization_id"
   FROM "ee_accesscontrol"
   INNER JOIN "posthog_team" ON ("ee_accesscontrol"."team_id" = "posthog_team"."id")
@@ -1342,6 +1344,8 @@
          "ee_accesscontrol"."created_by_id",
          "ee_accesscontrol"."created_at",
          "ee_accesscontrol"."updated_at",
+         "ee_accesscontrol"."managed_by",
+         "ee_accesscontrol"."managed_at",
          "posthog_team"."organization_id" AS "_team_organization_id"
   FROM "ee_accesscontrol"
   INNER JOIN "posthog_team" ON ("ee_accesscontrol"."team_id" = "posthog_team"."id")
@@ -2171,6 +2175,8 @@
          "ee_accesscontrol"."created_by_id",
          "ee_accesscontrol"."created_at",
          "ee_accesscontrol"."updated_at",
+         "ee_accesscontrol"."managed_by",
+         "ee_accesscontrol"."managed_at",
          "posthog_team"."organization_id" AS "_team_organization_id"
   FROM "ee_accesscontrol"
   INNER JOIN "posthog_team" ON ("ee_accesscontrol"."team_id" = "posthog_team"."id")
@@ -3000,6 +3006,8 @@
          "ee_accesscontrol"."created_by_id",
          "ee_accesscontrol"."created_at",
          "ee_accesscontrol"."updated_at",
+         "ee_accesscontrol"."managed_by",
+         "ee_accesscontrol"."managed_at",
          "posthog_team"."organization_id" AS "_team_organization_id"
   FROM "ee_accesscontrol"
   INNER JOIN "posthog_team" ON ("ee_accesscontrol"."team_id" = "posthog_team"."id")
@@ -3832,6 +3840,8 @@
          "ee_accesscontrol"."created_by_id",
          "ee_accesscontrol"."created_at",
          "ee_accesscontrol"."updated_at",
+         "ee_accesscontrol"."managed_by",
+         "ee_accesscontrol"."managed_at",
          "posthog_team"."organization_id" AS "_team_organization_id"
   FROM "ee_accesscontrol"
   INNER JOIN "posthog_team" ON ("ee_accesscontrol"."team_id" = "posthog_team"."id")
@@ -4664,6 +4674,8 @@
          "ee_accesscontrol"."created_by_id",
          "ee_accesscontrol"."created_at",
          "ee_accesscontrol"."updated_at",
+         "ee_accesscontrol"."managed_by",
+         "ee_accesscontrol"."managed_at",
          "posthog_team"."organization_id" AS "_team_organization_id"
   FROM "ee_accesscontrol"
   INNER JOIN "posthog_team" ON ("ee_accesscontrol"."team_id" = "posthog_team"."id")
@@ -5496,6 +5508,8 @@
          "ee_accesscontrol"."created_by_id",
          "ee_accesscontrol"."created_at",
          "ee_accesscontrol"."updated_at",
+         "ee_accesscontrol"."managed_by",
+         "ee_accesscontrol"."managed_at",
          "posthog_team"."organization_id" AS "_team_organization_id"
   FROM "ee_accesscontrol"
   INNER JOIN "posthog_team" ON ("ee_accesscontrol"."team_id" = "posthog_team"."id")
@@ -6724,6 +6738,8 @@
          "ee_accesscontrol"."created_by_id",
          "ee_accesscontrol"."created_at",
          "ee_accesscontrol"."updated_at",
+         "ee_accesscontrol"."managed_by",
+         "ee_accesscontrol"."managed_at",
          "posthog_team"."organization_id" AS "_team_organization_id"
   FROM "ee_accesscontrol"
   INNER JOIN "posthog_team" ON ("ee_accesscontrol"."team_id" = "posthog_team"."id")
@@ -7577,6 +7593,8 @@
          "ee_accesscontrol"."created_by_id",
          "ee_accesscontrol"."created_at",
          "ee_accesscontrol"."updated_at",
+         "ee_accesscontrol"."managed_by",
+         "ee_accesscontrol"."managed_at",
          "posthog_team"."organization_id" AS "_team_organization_id"
   FROM "ee_accesscontrol"
   INNER JOIN "posthog_team" ON ("ee_accesscontrol"."team_id" = "posthog_team"."id")
@@ -8505,6 +8523,8 @@
          "ee_accesscontrol"."created_by_id",
          "ee_accesscontrol"."created_at",
          "ee_accesscontrol"."updated_at",
+         "ee_accesscontrol"."managed_by",
+         "ee_accesscontrol"."managed_at",
          "posthog_team"."organization_id" AS "_team_organization_id"
   FROM "ee_accesscontrol"
   INNER JOIN "posthog_team" ON ("ee_accesscontrol"."team_id" = "posthog_team"."id")
@@ -9540,6 +9560,8 @@
          "ee_accesscontrol"."created_by_id",
          "ee_accesscontrol"."created_at",
          "ee_accesscontrol"."updated_at",
+         "ee_accesscontrol"."managed_by",
+         "ee_accesscontrol"."managed_at",
          "posthog_team"."organization_id" AS "_team_organization_id"
   FROM "ee_accesscontrol"
   INNER JOIN "posthog_team" ON ("ee_accesscontrol"."team_id" = "posthog_team"."id")
@@ -10021,6 +10043,8 @@
          "ee_accesscontrol"."created_by_id",
          "ee_accesscontrol"."created_at",
          "ee_accesscontrol"."updated_at",
+         "ee_accesscontrol"."managed_by",
+         "ee_accesscontrol"."managed_at",
          "posthog_team"."organization_id" AS "_team_organization_id"
   FROM "ee_accesscontrol"
   INNER JOIN "posthog_team" ON ("ee_accesscontrol"."team_id" = "posthog_team"."id")
@@ -11108,6 +11132,8 @@
          "ee_accesscontrol"."created_by_id",
          "ee_accesscontrol"."created_at",
          "ee_accesscontrol"."updated_at",
+         "ee_accesscontrol"."managed_by",
+         "ee_accesscontrol"."managed_at",
          "posthog_team"."organization_id" AS "_team_organization_id"
   FROM "ee_accesscontrol"
   INNER JOIN "posthog_team" ON ("ee_accesscontrol"."team_id" = "posthog_team"."id")
@@ -11550,6 +11576,8 @@
          "ee_accesscontrol"."created_by_id",
          "ee_accesscontrol"."created_at",
          "ee_accesscontrol"."updated_at",
+         "ee_accesscontrol"."managed_by",
+         "ee_accesscontrol"."managed_at",
          "posthog_team"."organization_id" AS "_team_organization_id"
   FROM "ee_accesscontrol"
   INNER JOIN "posthog_team" ON ("ee_accesscontrol"."team_id" = "posthog_team"."id")
@@ -11952,6 +11980,8 @@
          "ee_accesscontrol"."created_by_id",
          "ee_accesscontrol"."created_at",
          "ee_accesscontrol"."updated_at",
+         "ee_accesscontrol"."managed_by",
+         "ee_accesscontrol"."managed_at",
          "posthog_team"."organization_id" AS "_team_organization_id"
   FROM "ee_accesscontrol"
   INNER JOIN "posthog_team" ON ("ee_accesscontrol"."team_id" = "posthog_team"."id")
@@ -12880,6 +12910,8 @@
          "ee_accesscontrol"."created_by_id",
          "ee_accesscontrol"."created_at",
          "ee_accesscontrol"."updated_at",
+         "ee_accesscontrol"."managed_by",
+         "ee_accesscontrol"."managed_at",
          "posthog_team"."organization_id" AS "_team_organization_id"
   FROM "ee_accesscontrol"
   INNER JOIN "posthog_team" ON ("ee_accesscontrol"."team_id" = "posthog_team"."id")
@@ -13905,6 +13937,8 @@
          "ee_accesscontrol"."created_by_id",
          "ee_accesscontrol"."created_at",
          "ee_accesscontrol"."updated_at",
+         "ee_accesscontrol"."managed_by",
+         "ee_accesscontrol"."managed_at",
          "posthog_team"."organization_id" AS "_team_organization_id"
   FROM "ee_accesscontrol"
   INNER JOIN "posthog_team" ON ("ee_accesscontrol"."team_id" = "posthog_team"."id")
@@ -14771,6 +14805,8 @@
          "ee_accesscontrol"."created_by_id",
          "ee_accesscontrol"."created_at",
          "ee_accesscontrol"."updated_at",
+         "ee_accesscontrol"."managed_by",
+         "ee_accesscontrol"."managed_at",
          "posthog_team"."organization_id" AS "_team_organization_id"
   FROM "ee_accesscontrol"
   INNER JOIN "posthog_team" ON ("ee_accesscontrol"."team_id" = "posthog_team"."id")
