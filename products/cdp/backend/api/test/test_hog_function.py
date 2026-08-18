@@ -1475,8 +1475,7 @@ class TestHogFunctionAPI(ClickhouseTestMixin, APIBaseTest, QueryMatchingTest):
         response = self.client.get(f"/api/projects/{self.team.id}/hog_functions/?enabled=true,false")
         assert len(response.json()["results"]) == 2
 
-    @patch("posthog.cdp.site_functions.transpile", side_effect=mock_transpile)
-    def test_a_materialized_view_destination_with_only_the_picker_placeholder(self, *args):
+    def test_a_materialized_view_destination_with_only_the_picker_placeholder(self):
         # The filters serializer drops the "Select a table" placeholder, so a placeholder-only list
         # arrives non-empty and leaves empty. The consumer reads an empty list as "every view", so
         # this has to be rejected rather than silently subscribing to all of them.
@@ -1531,6 +1530,7 @@ class TestHogFunctionAPI(ClickhouseTestMixin, APIBaseTest, QueryMatchingTest):
         assert response.status_code == status.HTTP_201_CREATED, response.json()
         assert response.json()["filters"]["source"] == "data-warehouse-view"
 
+    @patch("posthog.cdp.site_functions.transpile", side_effect=mock_transpile)
     def test_create_hog_function_with_site_app_type(self, mock_transpile_fn):
         response = self.client.post(
             f"/api/projects/{self.team.id}/hog_functions/",
