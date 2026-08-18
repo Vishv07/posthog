@@ -19,9 +19,18 @@ async def produce_to_cdp_kafka_activity(inputs: CDPProducerWorkflowInputs) -> No
     bind_contextvars(team_id=inputs.team_id)
     logger = LOGGER.bind()
 
-    await CDPProducer(
-        team_id=inputs.team_id, schema_id=inputs.schema_id, job_id=inputs.job_id, logger=logger
-    ).produce_to_kafka_from_s3()
+    if inputs.saved_query_id is not None:
+        producer = CDPProducer.for_view(
+            team_id=inputs.team_id, saved_query_id=inputs.saved_query_id, job_id=inputs.job_id, logger=logger
+        )
+    elif inputs.schema_id is not None:
+        producer = CDPProducer.for_source(
+            team_id=inputs.team_id, schema_id=inputs.schema_id, job_id=inputs.job_id, logger=logger
+        )
+    else:
+        raise ValueError("CDP producer needs either a schema_id or a saved_query_id")
+
+    await producer.produce_to_kafka_from_s3()
 
 
 @workflow.defn(name="dwh-cdp-producer-job")
