@@ -21,13 +21,13 @@ const log = logger.scope("task-detail");
  * "Hand off" affordance in the task header: lets the task's owner pass
  * ownership to a colleague, who takes over driving it (the backend moves the
  * task, announces the handoff in the thread, and notifies the recipient).
- * Hidden unless the current user owns the task — everyone else just reads.
+ * Hidden unless the current user owns the task; everyone else just reads.
  */
 export function HandoffTaskButton({ task }: { task: Task }) {
   const authStatus = useAuthStateValue((s) => s.status);
   const currentUser = useCurrentUser();
   const { mutate: handoffTask, isPending } = useHandoffTask();
-  // Only fetched for the owner — that's the only case the menu can open in.
+  // Only fetched for the owner, the only case where the menu can open.
   const isOwner =
     authStatus === "authenticated" &&
     currentUser.data?.id != null &&

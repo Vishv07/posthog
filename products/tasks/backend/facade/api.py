@@ -5057,13 +5057,13 @@ def handoff_task(
     Ownership is what `task_control_q` keys on, so the recipient drives the task
     afterwards (steer, archive, forward thread messages), and future runs resolve
     GitHub authorship and notification recipients from them. Membership in the
-    project's organization is required — anything weaker would hand control of a
+    project's organization is required: anything weaker would hand control of a
     task to someone who can't see the project.
 
     Visibility follows the recipient when the task lives in a private space: a
     task in the actor's ``#me`` (or a legacy channel-less task) moves into the
     recipient's ``#me`` so they can actually open what's now theirs. Public
-    channels stay put — both sides keep the shared view.
+    channels stay put; both sides keep the shared view.
 
     Returns the updated task detail, or ``None`` when the actor can't control the
     task (same contract as ``update_task``). Raises ``TaskHandoffError`` for
