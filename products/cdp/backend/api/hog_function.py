@@ -162,6 +162,13 @@ def snapshot_hog_function_content(hog_function: HogFunction) -> dict:
     return snapshot
 
 
+def _named_warehouse_tables(entries: Any) -> list[Any]:
+    """The warehouse tables a filters blob actually names, ignoring the picker's placeholder row."""
+    if not isinstance(entries, list):
+        return []
+    return [entry for entry in entries if isinstance(entry, dict) and entry.get("table_name")]
+
+
 def _without(value: Any, keys: tuple[str, ...]) -> Any:
     return {k: v for k, v in value.items() if k not in keys} if isinstance(value, dict) else value
 
@@ -491,10 +498,14 @@ class HogFunctionSerializer(HogFunctionMinimalSerializer):
         # Materialized views are a newer source than warehouse tables, so nothing was saved before
         # the consumer matched on the selected table. That lets us require a selection here, where
         # an empty list still has to mean "every table" for the older source.
+        #
+        # Counts entries that name a table rather than entries that exist: the filters serializer
+        # drops the picker's "Select a table" placeholder, so a placeholder-only list arrives here
+        # non-empty and leaves it empty, which the consumer reads as "every view".
         if (
             data["filters"].get("source") == "data-warehouse-view"
             and self.context["function_will_be_enabled"]
-            and not data["filters"].get("data_warehouse")
+            and not _named_warehouse_tables(data["filters"].get("data_warehouse"))
         ):
             raise serializers.ValidationError({"filters": "Select the materialized view to trigger on."})
         self.context["encrypted_inputs"] = instance.encrypted_inputs if instance else {}

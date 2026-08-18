@@ -413,6 +413,24 @@ class TestCDPProducerHandoff(TestQualityGateBranching):
         started = [call.kwargs.get("workflow") or call.args[0] for call in start_child.await_args_list]
         assert "dwh-cdp-producer-job" not in started
 
+    async def test_a_producer_that_fails_to_start_clears_the_staged_rows(self):
+        # Nothing will read them now, and the prefix is keyed on this job, so no later run's own
+        # clear reaches them.
+        start_child = AsyncMock(side_effect=RuntimeError("task queue is gone"))
+        activity_results = [
+            False,
+            "job-1",
+            self._result(should_trigger=True),
+            PrepareQueryableTableResult(storage_delta_mib=None, total_storage_mib=None),
+            SucceedMaterializationResult(enrichment_needed=False, saved_query_id="sq-1"),
+            None,  # clear_cdp_staging
+        ]
+
+        _, execute_activity = await self._run(activity_results, {"checks_failed_blocking": 0}, start_child=start_child)
+
+        started = [call.args[0].__name__ for call in execute_activity.await_args_list]
+        assert "clear_cdp_staging_activity" in started
+
     async def test_a_quality_blocked_run_clears_its_staged_rows_instead_of_producing(self):
         # The rows were never published, and the prefix is keyed on this job, so no later run's own
         # clear will ever reach them.

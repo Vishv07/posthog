@@ -598,6 +598,7 @@ class MaterializeViewWorkflow(PostHogWorkflow):
                 ),
             )
         except WorkflowAlreadyStartedError:
+            # Already running against this job's staged rows, so they are still wanted.
             temporalio.workflow.logger.info(
                 "CDP producer job already running, skipping",
                 extra={"job_id": job_id},
@@ -608,6 +609,9 @@ class MaterializeViewWorkflow(PostHogWorkflow):
                 "Failed to start the CDP producer job",
                 extra={"job_id": job_id, "error": str(e)},
             )
+            # Nothing will ever read this job's staged rows now, and its prefix is keyed on the job,
+            # so no later run's own clear would reach them.
+            await self._discard_staged_cdp_rows(inputs, job_id, materialize_result)
 
     async def _discard_staged_cdp_rows(
         self,
