@@ -24,7 +24,7 @@ class ExternalDataWorkflowInputs:
         }
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(frozen=True)
 class CDPProducerWorkflowInputs:
     """Which staged run to produce to Kafka.
 

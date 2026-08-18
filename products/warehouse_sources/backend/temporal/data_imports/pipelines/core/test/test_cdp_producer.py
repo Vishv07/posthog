@@ -17,7 +17,7 @@ from asgiref.sync import sync_to_async
 from parameterized import parameterized
 
 from products.cdp.backend.models.hog_functions.hog_function import HogFunction
-from products.data_modeling.backend.models.datawarehouse_saved_query import DataWarehouseSavedQuery
+from products.data_modeling.backend.facade.models import DataWarehouseSavedQuery
 from products.warehouse_sources.backend.models.external_data_schema import ExternalDataSchema
 from products.warehouse_sources.backend.models.external_data_source import ExternalDataSource
 from products.warehouse_sources.backend.models.table import DataWarehouseTable
