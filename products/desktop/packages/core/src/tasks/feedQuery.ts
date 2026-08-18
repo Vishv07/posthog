@@ -108,6 +108,11 @@ export const CI_VALUES = [
   "none",
 ] as const;
 
+/** What `type:` can scope. Only the command palette acts on non-task kinds;
+ * a feed carries tasks, so its planner flags the rest as ignored. */
+export const TYPE_VALUES = ["task", "space", "command", "feed"] as const;
+export type TypeValue = (typeof TYPE_VALUES)[number];
+
 /** Friendlier spellings onto the backend's snapshot vocabulary
  * (`TaskRun.output.ci_status`, kept fresh by the CI follow-up loop). */
 const CI_ALIASES: Record<string, string> = {
@@ -225,11 +230,11 @@ function validateToken(token: FeedQueryToken, issues: FeedQueryIssue[]): void {
       return;
     }
     case "type": {
-      if (value !== "task") {
+      if (!TYPE_VALUES.includes(value as (typeof TYPE_VALUES)[number])) {
         issues.push({
           raw: token.raw,
           kind: "unknown-value",
-          message: `Feeds only carry tasks today, so "type:${token.value}" matches nothing`,
+          message: `Unknown "type:" value "${token.value}". Expected one of: ${TYPE_VALUES.join(", ")}`,
         });
       }
       return;
@@ -375,6 +380,17 @@ export interface FeedQueryPlan {
 
 function normalize(value: string): string {
   return value.trim().toLowerCase();
+}
+
+/** The result kind a query's `type:` token scopes to, or null for all. */
+export function feedQueryTypeScope(parsed: ParsedFeedQuery): TypeValue | null {
+  const token = parsed.tokens.find(
+    (t) =>
+      t.key === "type" &&
+      !t.negated &&
+      TYPE_VALUES.includes(normalize(t.value) as TypeValue),
+  );
+  return token ? (normalize(token.value) as TypeValue) : null;
 }
 
 const MAX_SUGGESTED_NAME_LENGTH = 80;
@@ -716,6 +732,21 @@ export function planFeedQuery(
             raw: involves.positives[0].raw,
           });
         }
+      }
+    }
+  }
+
+  const typeGroup = groups.get("type");
+  if (typeGroup) {
+    // `type:` scopes the command palette's result kinds. A feed's results are
+    // tasks by definition: `type:task` is a no-op and the rest say so.
+    for (const token of [...typeGroup.positives, ...typeGroup.negatives]) {
+      if (normalize(token.value) !== "task") {
+        issues.push({
+          raw: token.raw,
+          kind: "unsupported",
+          message: `Feeds only carry tasks, so "${token.raw}" is ignored here`,
+        });
       }
     }
   }
