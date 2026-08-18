@@ -13,6 +13,7 @@ from pathlib import Path
 
 from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
 from claude_agent_sdk.types import AssistantMessage, ToolUseBlock
+from gates import manifest_basenames
 from gateway import analytics_extra_properties, gateway_env, resolve_gateway_config
 from github import PRData, write_pr_diff
 from policy import _sanitize_untrusted, review_guidance_path, steering_path
@@ -546,7 +547,7 @@ class Reviewer:
         dep_manifests = cl.get("dep_manifests_without_lockfile", [])
         if dep_manifests:
             constraint += (
-                f"\nDependency manifests changed without a lockfile: {', '.join(dep_manifests)} — "
+                f"\nDependency manifests changed without a lockfile: {', '.join(manifest_basenames(dep_manifests))} — "
                 "no third-party code can be added, but check the manifest hunks and REFUSE if "
                 "scripts or lifecycle hooks changed."
             )
