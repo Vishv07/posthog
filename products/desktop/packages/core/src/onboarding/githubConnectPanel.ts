@@ -1,5 +1,9 @@
 import type { OnboardingGithubConnectFlow } from "@posthog/shared/analytics-events";
-import { GITHUB_CONNECT_TIMEOUT_MESSAGE } from "../integrations/connectErrors";
+import {
+  GITHUB_CONNECT_TIMEOUT_MESSAGE,
+  isGithubConnectPendingApproval,
+} from "../integrations/connectErrors";
+import type { PendingGithubApproval } from "../integrations/connectMachine";
 import { POSTHOG_GITHUB_APP_URL } from "../integrations/githubApp";
 
 export interface GithubPanelMessageOptions {
@@ -136,4 +140,22 @@ export function deriveConnectButtonState(inputs: {
       ? "Try again"
       : "Connect GitHub";
   return { isRetry, shouldReset: inputs.hasConnectError, label };
+}
+
+export interface AwaitingApprovalInputs {
+  errorCode: string | null | undefined;
+  pending: PendingGithubApproval | null;
+  currentIdentity: string | null;
+  hasIntegration: boolean;
+}
+
+/** The connect panel shows the pending state either because this attempt just
+ * came back pending, or because an earlier one did and the wait is still on
+ * for this account, so the state survives leaving and returning to the step. */
+export function isAwaitingGithubApproval(
+  inputs: AwaitingApprovalInputs,
+): boolean {
+  if (isGithubConnectPendingApproval(inputs.errorCode)) return true;
+  if (inputs.hasIntegration || inputs.pending === null) return false;
+  return inputs.pending.identity === inputs.currentIdentity;
 }

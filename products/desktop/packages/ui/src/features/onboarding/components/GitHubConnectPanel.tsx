@@ -2,6 +2,7 @@ import {
   ArrowSquareOut,
   ArrowsClockwise,
   CheckCircle,
+  Clock,
   GearSix,
   GithubLogo,
   Plus,
@@ -16,14 +17,19 @@ import {
   deriveConnectButtonState,
   getGithubPanelMessage,
   isAnyIntegrationStale,
+  isAwaitingGithubApproval,
   resolveSelectedProjectId,
 } from "@posthog/core/onboarding/githubConnectPanel";
 import type { GithubConnectService } from "@posthog/core/onboarding/githubConnectService";
 import { GITHUB_CONNECT_SERVICE } from "@posthog/core/onboarding/identifiers";
 import { useService } from "@posthog/di/react";
+import { Button as QuillButton } from "@posthog/quill";
 import type { OnboardingGithubConnectFlow } from "@posthog/shared/analytics-events";
 import { ANALYTICS_EVENTS } from "@posthog/shared/analytics-events";
-import { useAuthStateValue } from "@posthog/ui/features/auth/store";
+import {
+  getAuthIdentity,
+  useAuthStateValue,
+} from "@posthog/ui/features/auth/store";
 import { useGithubDisconnect } from "@posthog/ui/features/integrations/useGithubDisconnect";
 import {
   describeGithubConnectError,
@@ -37,6 +43,7 @@ import { OptionalBadge } from "@posthog/ui/features/onboarding/components/Option
 import { PANEL_SHADOW } from "@posthog/ui/features/onboarding/components/onboardingStyles";
 import { useProjectsWithIntegrations } from "@posthog/ui/features/onboarding/hooks/useProjectsWithIntegrations";
 import { useOnboardingStore } from "@posthog/ui/features/onboarding/onboardingStore";
+import { useSettingsStore } from "@posthog/ui/features/settings/settingsStore";
 import { track } from "@posthog/ui/shell/analytics";
 import { openExternalUrl } from "@posthog/ui/shell/openExternal";
 import {
@@ -185,6 +192,14 @@ export function GitHubConnectPanel() {
     isLoading: githubUserIntegrationsLoading,
   } = useUserGithubIntegrations();
   const hasGitIntegration = githubUserIntegrations.length > 0;
+  const pendingMarker = useSettingsStore((s) => s.githubConnectPending);
+  const currentIdentity = useAuthStateValue((state) => getAuthIdentity(state));
+  const isAwaitingApproval = isAwaitingGithubApproval({
+    errorCode: connectError?.code,
+    pending: pendingMarker,
+    currentIdentity,
+    hasIntegration: hasGitIntegration,
+  });
   const { failedInstallationIds, reposByInstallationId } =
     useUserRepositoryIntegration();
   const anyIntegrationStale = isAnyIntegrationStale(
@@ -312,10 +327,23 @@ export function GitHubConnectPanel() {
                   )}
                   .
                 </Text>
+              ) : isAwaitingApproval ? (
+                <div className="flex flex-col gap-1">
+                  <div className="flex items-center gap-2 font-medium text-(--gray-12) text-sm">
+                    <Clock size={16} className="text-(--amber-11)" />
+                    Waiting for a GitHub org owner to approve
+                  </div>
+                  <span className="text-(--gray-11) text-sm">
+                    We sent your request. Until an owner approves it, tasks run
+                    on your machine. You can keep going and connect once it's
+                    approved. GitHub shows the open request if you connect
+                    before then.
+                  </span>
+                </div>
               ) : (
                 <Text
                   className={
-                    hasConnectError && !isPendingApproval
+                    hasConnectError
                       ? "text-(--red-11) text-sm"
                       : "text-(--gray-11) text-sm"
                   }
@@ -453,6 +481,20 @@ export function GitHubConnectPanel() {
                 </Button>
               </Flex>
             </Flex>
+          ) : isAwaitingApproval ? (
+            <QuillButton
+              variant="outline"
+              size="sm"
+              className="self-start"
+              loading={isConnecting}
+              onClick={() => {
+                resetConnect();
+                initiateConnect("user_new", true);
+              }}
+            >
+              I've been approved, connect
+              <ArrowSquareOut size={12} />
+            </QuillButton>
           ) : !isLoading && !githubUserIntegrationsLoading ? (
             selectedProject?.hasGithubIntegration && canTakeAction ? (
               <Button

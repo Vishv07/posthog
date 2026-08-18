@@ -9,6 +9,7 @@ import {
   deriveConnectButtonState,
   getGithubPanelMessage,
   isAnyIntegrationStale,
+  isAwaitingGithubApproval,
   resolveSelectedProjectId,
 } from "./githubConnectPanel";
 
@@ -226,4 +227,62 @@ describe("deriveConnectButtonState", () => {
       }),
     ).toEqual({ isRetry: true, shouldReset: false, label: "Retry connection" });
   });
+});
+
+describe("isAwaitingGithubApproval", () => {
+  const pending = { identity: "us:1", since: 1_000 };
+  it.each([
+    [
+      "this attempt came back pending",
+      "github_install_pending",
+      null,
+      "us:1",
+      false,
+      true,
+    ],
+    [
+      "earlier wait persists for the same account",
+      null,
+      pending,
+      "us:1",
+      false,
+      true,
+    ],
+    [
+      "earlier wait belongs to another account",
+      null,
+      pending,
+      "us:2",
+      false,
+      false,
+    ],
+    [
+      "already connected clears the wait view",
+      null,
+      pending,
+      "us:1",
+      true,
+      false,
+    ],
+    ["nothing pending", null, null, "us:1", false, false],
+  ] as const)(
+    "%s",
+    (
+      _label,
+      errorCode,
+      pendingMarker,
+      currentIdentity,
+      hasIntegration,
+      expected,
+    ) => {
+      expect(
+        isAwaitingGithubApproval({
+          errorCode,
+          pending: pendingMarker,
+          currentIdentity,
+          hasIntegration,
+        }),
+      ).toBe(expected);
+    },
+  );
 });
