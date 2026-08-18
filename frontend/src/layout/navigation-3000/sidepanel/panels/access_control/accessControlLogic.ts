@@ -16,8 +16,10 @@ import { teamLogic } from 'scenes/teamLogic'
 import {
     APIScopeObject,
     AccessControlLevel,
+    AccessControlManager,
     AccessControlResponseType,
     AccessControlType,
+    AccessControlTypeBase,
     AccessControlTypeMember,
     AccessControlTypeOrganizationAdmins,
     AccessControlTypeProject,
@@ -63,8 +65,10 @@ export interface accessControlLogicValues {
     availableLevelsWithNone: AccessControlLevel[]
     canEditAccessControls: boolean | null
     endpoint: string
+    hasLockedRules: boolean
     humanReadableResource: string
     inheritedAccess: InheritedAccess | null
+    lockedRuleReason: (rule?: Pick<AccessControlTypeBase, 'managed_by'> | null) => string | undefined
     membersById: Record<string, OrganizationMemberType>
     minimumAccessLevel: AccessControlLevel | null
     organizationAdmins: OrganizationMemberType[]
@@ -758,6 +762,10 @@ export interface accessControlLogicMeta {
         availableLevelsWithNone: (accessControls: AccessControlResponseType | null) => AccessControlLevel[]
         availableLevels: (availableLevelsWithNone: AccessControlLevel[]) => AccessControlLevel[]
         canEditAccessControls: (accessControls: AccessControlResponseType | null) => boolean | null
+        hasLockedRules: (accessControls: AccessControlResponseType | null) => boolean
+        lockedRuleReason: (
+            accessControls: AccessControlResponseType | null
+        ) => (rule?: Pick<AccessControlTypeBase, 'managed_by'> | null) => string | undefined
         accessControlDefault: (accessControls: AccessControlResponseType | null) => AccessControlTypeProject | null
         inheritedAccess: (accessControls: AccessControlResponseType | null) => InheritedAccess | null
         organizationAdmins: (sortedMembers: OrganizationMemberType[] | null) => OrganizationMemberType[]
@@ -1283,6 +1291,24 @@ export const accessControlLogic = kea<accessControlLogicType>([
             (accessControls: AccessControlResponseType | null): boolean | null => {
                 return accessControls?.user_can_edit_access_levels ?? null
             },
+        ],
+
+        hasLockedRules: [
+            (s) => [s.accessControls],
+            (accessControls: AccessControlResponseType | null): boolean =>
+                !!accessControls?.managed_rules_locked &&
+                (accessControls?.access_controls ?? []).some((rule) => !!rule.managed_by),
+        ],
+
+        // Per rule, not per panel: one object can hold rules Terraform manages next to rules
+        // someone set here, and only the managed ones lock.
+        lockedRuleReason: [
+            (s) => [s.accessControls],
+            (accessControls: AccessControlResponseType | null) =>
+                (rule?: Pick<AccessControlTypeBase, 'managed_by'> | null): string | undefined =>
+                    accessControls?.managed_rules_locked && rule?.managed_by === AccessControlManager.Terraform
+                        ? 'Terraform manages this rule. Change it in your Terraform configuration.'
+                        : undefined,
         ],
 
         // The object's own default rule, or null when the object has no override and therefore
