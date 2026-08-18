@@ -5231,7 +5231,8 @@ def _with_ai_run_defaults(data: dict, *, team_id: int, acting_user_id: int | Non
     )
 
     updated = dict(data)
-    return updated if apply_ai_run_defaults(updated, team_id, acting_user_id) else data
+    apply_ai_run_defaults(updated, team_id, acting_user_id)
+    return updated
 
 
 def _find_idling_warm_run(
