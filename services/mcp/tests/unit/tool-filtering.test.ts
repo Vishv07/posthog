@@ -882,7 +882,7 @@ describe('Tool Filtering - Feature Flags', () => {
                 'data-warehouse-scene',
             ])
         )
-        expect(flags).toHaveLength(32)
+        expect(flags).toHaveLength(31)
     })
 
     it('every loops tool is gated on the loops flag', () => {
