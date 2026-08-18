@@ -85,8 +85,8 @@ export interface taskTrackerSceneLogicValues {
     currentProjectId: number | null // projectLogic
     activeCreation: ActiveCreation | null // runnerPanelLogic
     historyExpanded: boolean // runnerPanelLogic
-    claudeDefaultEffort: string | null // taskRunDefaultsLogic
-    claudeDefaultModel: string | null // taskRunDefaultsLogic
+    defaultEffort: string | null // taskRunDefaultsLogic
+    defaultModel: string | null // taskRunDefaultsLogic
     repositories: string[] // tasksLogic
     taskListParams: TaskListParams // tasksLogic
     tasks: Task[] // tasksLogic
@@ -300,10 +300,10 @@ export interface taskTrackerSceneLogicMeta {
     key: string
     __keaTypeGenInternalSelectorTypes: {
         displayHeadline: (overrideHeadlines: string[] | null, headlineSeed: number) => string
-        displayModel: (newTaskData: TaskCreateForm, claudeDefaultModel: string | null) => string
+        displayModel: (newTaskData: TaskCreateForm, defaultModel: string | null) => string
         displayEffort: (
             newTaskData: TaskCreateForm,
-            claudeDefaultEffort: string | null,
+            defaultEffort: string | null,
             displayModel: string,
             catalogue: ModelChoiceApi[]
         ) => ReasoningEffortEnumApi
@@ -347,7 +347,7 @@ export const taskTrackerSceneLogic = kea<taskTrackerSceneLogicType>([
             modelCatalogueLogic,
             ['catalogue'],
             taskRunDefaultsLogic,
-            ['claudeDefaultModel', 'claudeDefaultEffort'],
+            ['defaultModel', 'defaultEffort'],
         ],
         actions: [
             runnerPanelLogic(props),
@@ -451,19 +451,19 @@ export const taskTrackerSceneLogic = kea<taskTrackerSceneLogicType>([
         // The pickers render these and a submit sends exactly these, so the composer can never
         // show one model or effort while the run launches with another.
         displayModel: [
-            (s) => [s.newTaskData, s.claudeDefaultModel],
-            (newTaskData: TaskCreateForm, claudeDefaultModel: string | null): string =>
-                newTaskData.model ?? claudeDefaultModel ?? DEFAULT_COMPOSER_MODEL,
+            (s) => [s.newTaskData, s.defaultModel],
+            (newTaskData: TaskCreateForm, defaultModel: string | null): string =>
+                newTaskData.model ?? defaultModel ?? DEFAULT_COMPOSER_MODEL,
         ],
         displayEffort: [
-            (s) => [s.newTaskData, s.claudeDefaultEffort, s.displayModel, s.catalogue],
+            (s) => [s.newTaskData, s.defaultEffort, s.displayModel, s.catalogue],
             (
                 newTaskData: TaskCreateForm,
-                claudeDefaultEffort: string | null,
+                defaultEffort: string | null,
                 displayModel: string,
                 catalogue: ModelChoiceApi[]
             ): ReasoningEffortEnumApi =>
-                resolveEffortForModel(catalogue, newTaskData.reasoningEffort ?? claudeDefaultEffort, displayModel),
+                resolveEffortForModel(catalogue, newTaskData.reasoningEffort ?? defaultEffort, displayModel),
         ],
         // Neither picker touched: submit omits the triple so the backend resolves it, which also
         // lets a warm run provisioned under the default match.
@@ -590,21 +590,21 @@ export const taskTrackerSceneLogic = kea<taskTrackerSceneLogicType>([
                     pending_user_message: wrapWithPosthogContext(description, seededContext),
                 }
 
-                // The model triple is omitted only when nothing is pinned AND a server default exists, so
-                // the backend resolves it (which also lets a warm run provisioned under that default
-                // match). Otherwise send the displayed selection, with the runtime derived from the model.
+                // Always the displayed selection, runtime derived from the model — which is the resolved
+                // default when nothing was picked. Omitting the triple to let the backend resolve it is not
+                // an option: `initial_permission_mode` is rejected without a `runtime_adapter` alongside it,
+                // and the launch mode is the composer's to state (the backend only fills one in for Codex,
+                // so a Claude run would silently drop off Plan).
                 const runResponse = await tasksRunCreate(
                     projectId,
                     newTask.id,
-                    values.isDefaultSelection && values.claudeDefaultModel
-                        ? { ...runPayload, initial_permission_mode: permissionMode }
-                        : buildRunCreateRequest(
-                              values.catalogue,
-                              values.displayModel,
-                              values.displayEffort,
-                              permissionMode,
-                              runPayload
-                          )
+                    buildRunCreateRequest(
+                        values.catalogue,
+                        values.displayModel,
+                        values.displayEffort,
+                        permissionMode,
+                        runPayload
+                    )
                 )
 
                 // Mark the seeded non-text refs sent under the created task, so the run's first follow-up
