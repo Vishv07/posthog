@@ -328,16 +328,13 @@ export function GitHubConnectPanel() {
                   .
                 </Text>
               ) : isAwaitingApproval ? (
-                <div className="flex flex-col gap-1">
+                <div className="flex flex-col gap-1 pt-3">
                   <div className="flex items-center gap-2 font-medium text-(--gray-12) text-sm">
                     <Clock size={16} className="text-(--amber-11)" />
                     Waiting for a GitHub org owner to approve
                   </div>
                   <span className="text-(--gray-11) text-sm">
-                    We sent your request. Until an owner approves it, tasks run
-                    on your machine. You can keep going and connect once it's
-                    approved. GitHub shows the open request if you connect
-                    before then.
+                    Tasks run on your machine until then. You can keep going.
                   </span>
                 </div>
               ) : (
