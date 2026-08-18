@@ -9007,6 +9007,8 @@ export const externalDataSources = [
     'DeelFlows',
     'Hootsuite',
     'WisprFlow',
+    'IronSourceAds',
+    'MicrosoftExcel',
 ] as const
 
 export type ExternalDataSourceType = (typeof externalDataSources)[number]

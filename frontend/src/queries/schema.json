@@ -25685,7 +25685,9 @@
                 "Zitadel",
                 "DeelFlows",
                 "Hootsuite",
-                "WisprFlow"
+                "WisprFlow",
+                "IronSourceAds",
+                "MicrosoftExcel"
             ],
             "type": "string"
         },

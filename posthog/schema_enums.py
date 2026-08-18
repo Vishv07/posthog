@@ -2556,6 +2556,8 @@ class ExternalDataSourceType(StrEnum):
     DEEL_FLOWS = "DeelFlows"
     HOOTSUITE = "Hootsuite"
     WISPR_FLOW = "WisprFlow"
+    IRON_SOURCE_ADS = "IronSourceAds"
+    MICROSOFT_EXCEL = "MicrosoftExcel"
 
 
 class ExternalQueryErrorCode(StrEnum):
