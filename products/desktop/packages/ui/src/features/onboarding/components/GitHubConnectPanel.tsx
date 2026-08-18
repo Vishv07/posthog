@@ -77,10 +77,8 @@ export function GitHubConnectPanel() {
     [projects, selectedProjectId],
   );
 
-  // Tracks a connect attempt from "started" through to whichever terminal
-  // outcome lands (connected / failed / pending / timed out), so an unmount in
-  // between — the user closing the panel or navigating away mid-flow — can be
-  // reported as an abandoned connect instead of silently disappearing.
+  // Armed on connect start, cleared on any terminal outcome, so an unmount in
+  // between is reported as an abandoned connect.
   const inFlightConnectRef = useRef<{
     flowType: OnboardingGithubConnectFlow;
     startedAtMs: number;
@@ -104,9 +102,8 @@ export function GitHubConnectPanel() {
   const canTakeAction = !isConnecting && !timedOut && !hasConnectError;
   const isPendingApproval = isGithubConnectPendingApproval(connectError?.code);
 
-  // Records the start event and arms the in-flight ref so an unmount mid-flow
-  // reports as abandoned. Every path that begins a connect must go through this,
-  // including reconnect, or its "started" event has no abandoned counterpart.
+  // Every path that begins a connect, including reconnect, must go through
+  // this, or its "started" event has no abandoned counterpart.
   const markConnectStarted = (
     flowType: OnboardingGithubConnectFlow,
     isRetry = false,
@@ -157,10 +154,8 @@ export function GitHubConnectPanel() {
     const fingerprint = buildConnectFailureFingerprint(failureInputs);
     if (!connectService.shouldReportFailure(fingerprint)) return;
     if (isPendingApproval) {
-      // The pending marker that arms the later "approved after pending"
-      // celebration is written at the shared connect choke point
-      // (useConnectStateMachine) so every surface records it. This event stays
-      // onboarding-scoped and carries the onboarding flow_type.
+      // The pending marker itself is written in useConnectStateMachine; only
+      // the onboarding-scoped event lives here.
       track(ANALYTICS_EVENTS.ONBOARDING_GITHUB_CONNECT_PENDING_ADMIN, {
         flow_type: flowType,
       });

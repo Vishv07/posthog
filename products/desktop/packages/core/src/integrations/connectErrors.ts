@@ -37,9 +37,8 @@ export const GITHUB_CONNECT_ERROR_MESSAGES: Record<string, string> = {
 
 export const GITHUB_CONNECT_PENDING_APPROVAL_CODE = "github_install_pending";
 
-/** True when the connect outcome is GitHub's "request approval from an owner"
- * screen rather than a real failure — the connect can still succeed later
- * once an org owner approves it, so callers should treat this as informational. */
+/** Travels on the error channel but is not a failure: the connect can still
+ * succeed once an org owner approves, so callers render it as informational. */
 export function isGithubConnectPendingApproval(
   code: string | null | undefined,
 ): boolean {

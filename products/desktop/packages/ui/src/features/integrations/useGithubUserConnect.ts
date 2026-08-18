@@ -1,10 +1,7 @@
-import type { PostHogAPIClient } from "@posthog/api-client/posthog-client";
-import { isGithubConnectPendingApproval } from "@posthog/core/integrations/connectErrors";
 import {
   CONNECT_INITIAL_STATUS,
   type ConnectError,
   type ConnectState,
-  computeApprovedAfterPending,
   connectReducer,
   deriveConnectFlags,
   githubInvalidationKeys,
@@ -12,118 +9,19 @@ import {
 } from "@posthog/core/integrations/connectMachine";
 import type { GithubConnectService } from "@posthog/core/integrations/githubConnectService";
 import { GITHUB_CONNECT_SERVICE } from "@posthog/core/integrations/identifiers";
-import { userGithubIntegrationKeys } from "@posthog/core/integrations/repositoryKeys";
 import { useService } from "@posthog/di/react";
-import { ANALYTICS_EVENTS } from "@posthog/shared/analytics-events";
 import { useOptionalAuthenticatedClient } from "@posthog/ui/features/auth/authClient";
-import {
-  getAuthIdentity,
-  useAuthStateValue,
-  useAuthStore,
-} from "@posthog/ui/features/auth/store";
+import { useAuthStateValue } from "@posthog/ui/features/auth/store";
 import { useIsOrgAdmin } from "@posthog/ui/features/auth/useOrgRole";
-import {
-  afterSettingsHydrated,
-  useSettingsStore,
-} from "@posthog/ui/features/settings/settingsStore";
-import { toast } from "@posthog/ui/primitives/toast";
-import { track } from "@posthog/ui/shell/analytics";
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
+import {
+  celebrateApprovalIfPending,
+  recordPendingApprovalWait,
+} from "./githubApprovalWait";
 import { useGitHubIntegrationCallback } from "./useGitHubIntegrationCallback";
 
 export { describeGithubConnectError } from "@posthog/core/integrations/connectErrors";
-
-/** GitHub connect succeeded: if the account was waiting on org owner approval,
- * celebrate it — announce it, clear the wait, and default the next task to
- * cloud now that GitHub can actually run one there. The single choke point for
- * every surface that connects GitHub, since both `useGithubUserConnect` and
- * `useGithubConnect` route their success through `useConnectStateMachine`.
- *
- * Runs only after settings hydration (a cold-start deep link can otherwise
- * race the persisted store) and only celebrates once a refetch of the
- * account's GitHub integrations actually shows an installation: the deep
- * link that reports success carries no nonce, so anyone can craft
- * `posthog-code://integration?status=success` and flip the marker without
- * this check confirming it against the server. */
-function celebrateApprovalIfPending(
-  queryClient: QueryClient,
-  client: PostHogAPIClient | null,
-): void {
-  afterSettingsHydrated(() => {
-    void celebrateApprovalIfPendingAfterHydration(queryClient, client);
-  });
-}
-
-async function celebrateApprovalIfPendingAfterHydration(
-  queryClient: QueryClient,
-  client: PostHogAPIClient | null,
-): Promise<void> {
-  const {
-    githubConnectPending,
-    setGithubConnectPending,
-    setLastUsedRunMode,
-    setLastUsedWorkspaceMode,
-  } = useSettingsStore.getState();
-  const currentIdentity = getAuthIdentity(useAuthStore.getState().authState);
-  const { shouldCelebrate, waitSeconds } = computeApprovedAfterPending({
-    pending: githubConnectPending,
-    currentIdentity,
-    nowMs: Date.now(),
-  });
-  if (!shouldCelebrate) return;
-  if (!client) return;
-  try {
-    const integrations = await queryClient.fetchQuery({
-      queryKey: userGithubIntegrationKeys.list(),
-      queryFn: () => client.getGithubUserIntegrations(),
-    });
-    if (integrations.length === 0) return;
-  } catch {
-    // Best effort: an unverifiable refetch neither celebrates nor clears the
-    // marker, so a genuine approval can still be celebrated once the network
-    // recovers.
-    return;
-  }
-  track(ANALYTICS_EVENTS.ONBOARDING_GITHUB_CONNECT_APPROVED_AFTER_PENDING, {
-    wait_seconds: waitSeconds,
-  });
-  setGithubConnectPending(null);
-  // The next task's cloud-vs-local default is driven by lastUsedWorkspaceMode,
-  // so set it to honor the toast; lastUsedRunMode is kept paired with it, the
-  // way task creation does.
-  setLastUsedWorkspaceMode("cloud");
-  setLastUsedRunMode("cloud");
-  toast.success(
-    "GitHub is connected",
-    "Your next tasks will run in the cloud.",
-  );
-}
-
-/** GitHub connect is waiting on org owner approval: record when the wait
- * started, once per account, so a later successful connect from any surface
- * can be celebrated as an approval. Lives at the shared choke point rather
- * than in a single component because the pending callback reaches whichever
- * surface is mounted — and on a cold start, only whichever drains it first —
- * so writing it here keeps the marker from being lost when the pending
- * outcome lands somewhere other than the onboarding panel, or after that
- * panel unmounts. Runs only after settings hydration for the same reason. */
-function recordPendingApprovalWait(errorCode: string | null): void {
-  if (!isGithubConnectPendingApproval(errorCode)) return;
-  afterSettingsHydrated(() => {
-    const currentIdentity = getAuthIdentity(useAuthStore.getState().authState);
-    if (currentIdentity === null) return;
-    const { githubConnectPending, setGithubConnectPending } =
-      useSettingsStore.getState();
-    if (
-      githubConnectPending !== null &&
-      githubConnectPending.identity === currentIdentity
-    ) {
-      return;
-    }
-    setGithubConnectPending({ identity: currentIdentity, since: Date.now() });
-  });
-}
 
 const IS_DEV = import.meta.env.DEV;
 

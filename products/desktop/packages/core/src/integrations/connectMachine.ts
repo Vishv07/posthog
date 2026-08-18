@@ -93,13 +93,8 @@ export interface ApprovedAfterPendingOutcome {
   waitSeconds: number;
 }
 
-/** Decides whether a successful connect follows an earlier "needs org owner
- * approval" outcome, and how long the wait was. `pending` is the persisted
- * marker set when that pending outcome first arrived, stamped with the
- * identity of the account that was waiting; `null` means there was nothing to
- * wait on. The identity must match `currentIdentity` — the marker is device-
- * global, so a different account signed in on the same machine must not
- * celebrate someone else's wait. */
+/** The pending marker is device-global, so it must match `currentIdentity`:
+ * a different account on the same machine must not celebrate someone else's wait. */
 export function computeApprovedAfterPending(params: {
   pending: PendingGithubApproval | null;
   currentIdentity: string | null;

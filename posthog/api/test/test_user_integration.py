@@ -663,9 +663,7 @@ class TestUserIntegrationEndpoints(APIBaseTest):
         self.assertIn("github_link_error=missing_params", response["Location"])
 
     def test_github_link_personal_install_reports_pending_approval_when_org_owner_must_approve(self):
-        # GitHub sends the user back with `setup_action=request` and no `installation_id`/`code`
-        # when the account isn't an org owner, so it only requested approval instead of installing.
-        # That must surface as its own error code, not fall through to the generic missing_params.
+        # Non-owner accounts come back with setup_action=request and no installation_id/code.
         state = "test_state_pending_approval"
         store_unified_authorize_state(
             GitHubAuthorizeState(

@@ -150,11 +150,8 @@ interface SettingsStore {
   setDefaultReasoningEffort: (effort: DefaultReasoningEffort) => void;
 
   // GitHub connect
-  // Set when GitHub reports "needs org owner approval" for a connect
-  // attempt, stamped with the identity of the account that was waiting;
-  // null once approved (or never pending). Lets a later successful connect
-  // on any surface recognize it followed that wait and celebrate it, without
-  // celebrating a different account's wait on the same device.
+  // Stamped with the waiting account's identity because the store is
+  // device-global and a different account must not inherit the wait.
   githubConnectPending: PendingGithubApproval | null;
   setGithubConnectPending: (value: PendingGithubApproval | null) => void;
 
@@ -659,11 +656,9 @@ export const useSettingsStore = create<SettingsStore>()(
 );
 
 /**
- * Runs `fn` once persisted settings have loaded, immediately if hydration
- * already finished. Settings persist through an IPC round trip to the host
- * (see rendererStorage.ts), so on a cold start a deep-link callback can drain
- * before hydration completes; reading or writing store state before then
- * races the rehydrate and gets silently overwritten.
+ * Settings persist through an IPC round trip to the host (rendererStorage.ts),
+ * so on a cold start a deep-link callback can run before hydration; a write
+ * made then is silently overwritten by the rehydrate.
  */
 export function afterSettingsHydrated(fn: () => void): void {
   if (useSettingsStore.getState()._hasHydrated) {
